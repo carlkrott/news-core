@@ -64,6 +64,7 @@ PUBLIC_ALLOWLIST: frozenset[str] = frozenset(
         ".github/ISSUE_TEMPLATE/config.yml",
         ".github/ISSUE_TEMPLATE/bug_report.yml",
         ".github/ISSUE_TEMPLATE/feature_request.yml",
+        ".github/ISSUE_TEMPLATE/security.md",
         ".github/workflows/ci.yml",
         ".github/workflows/security.yml",
         ".github/workflows/release.yml",
@@ -349,6 +350,7 @@ CONTENT_SPAN_ALLOWANCES: dict[str, dict[str, tuple[tuple[int, int], ...]]] = {
     "LICENSE": {"MAINTAINER_LITERAL": _line_spans(3)},
     ".github/CODEOWNERS": {"MAINTAINER_LITERAL": _line_spans(3)},
     ".github/ISSUE_TEMPLATE/config.yml": {"MAINTAINER_LITERAL": _line_spans(10)},
+    ".github/ISSUE_TEMPLATE/security.md": {"MAINTAINER_LITERAL": _line_spans(12)},
 }
 
 _SCANNER_ALLOWANCE_ASSIGNMENTS = frozenset(
