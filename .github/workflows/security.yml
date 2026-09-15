@@ -59,7 +59,12 @@ jobs:
           print("all workflow action references are full commit SHAs")
           PY
       - name: re-scan publication surface
-        run: python3 scripts/check_publication_safety.py .
+        run: |
+          rm -rf /tmp/news-core-public-export
+          python3 scripts/export_public_tree.py \
+            --source . \
+            --destination /tmp/news-core-public-export
+          python3 scripts/check_publication_safety.py /tmp/news-core-public-export
 
   contract-verifier:
     name: verify_container_contract (security pass)

@@ -109,8 +109,10 @@ EXPORT_EXCLUDED_EXACT: frozenset[str] = frozenset(
         "STAGING_MANIFEST.json",
     }
 )
+# Git checkout metadata is intentionally ignored by the exporter; direct scans
+# still reject it as an unclassified path.
 EXPORT_EXCLUDED_COMPONENTS: frozenset[str] = frozenset(
-    {"private-evidence", ".release_manifest", "__pycache__", ".pytest_cache"}
+    {".git", "private-evidence", ".release_manifest", "__pycache__", ".pytest_cache"}
 )
 EXPORT_EXCLUDED_SUFFIXES: tuple[str, ...] = (".pyc", ".pyo")
 
