@@ -1,0 +1,41 @@
+# Public-export example policy.  This is a sanitized, placeholder copy
+# of the operator's live policy.  Replace ``example.com`` placeholders
+# with your own values; do not commit or publish real values.
+version = 1
+
+[pipeline]
+database = "sqlite"
+journal_mode = "wal"
+serialized_writer = true
+# Delivery is intentionally hard-disabled.  Live delivery is out of
+# scope for the public core and must remain disabled until a future
+# tranche authorizes it.
+dry_run = true
+breaking_alerts = "pipeline_failure_only"
+reddit_direct_ingestion = false
+evidence_rule = "one_authoritative_primary_or_two_independent_including_neutral_or_specialist"
+raw_body_retention_days = 30
+normalized_retention = "indefinite"
+
+[report]
+scope = "combined"
+# Category list is illustrative; the operator may add or remove entries.
+categories = ["ai", "world", "audio_engineering", "hardware", "fantasy_novel", "audiovisual", "av_corporate", "our_setup"]
+time = "08:00"
+timezone = "Europe/London"
+channel = "telegram"
+verified_events_only = true
+watchlist_max_items = 3
+formats = ["json", "jsonl", "markdown", "manifest"]
+depth = "short_human_plus_comprehensive_archive"
+
+[deferred]
+decisions = [
+    "priority/order and merge/remove/add decisions for the eight categories",
+    "specific Bluesky/Mastodon/Lemmy/YouTube/GitHub/publisher/vendor seeds",
+    "trusted, distrusted, or deliberately balanced outlets",
+    "manual-review behavior for contested/high-impact items",
+    "first external consumers of the event store",
+    "language and geography beyond current English/global baseline",
+    "approval for a 15-minute scheduler and bounded daytime local-LLM use",
+]

@@ -1,0 +1,27 @@
+{
+  "description": "Valid SearXNG JSON response with two results",
+  "query": "LLM+AI+model+release+2026",
+  "categories": ["it", "news"],
+  "response": {
+    "results": [
+      {
+        "url": "https://example.com/ai-llm-release-2026",
+        "title": "Major AI Lab Releases New LLM",
+        "content": "A leading AI lab has announced a new large language model...",
+        "engine": "duckduckgo",
+        "publishedDate": "2026-09-06T10:00:00Z",
+        "author": "Jane Doe"
+      },
+      {
+        "url": "https://example.com/openai-model-announce",
+        "title": "OpenAI Announces Next Generation Model",
+        "content": "OpenAI has revealed its latest model architecture...",
+        "engine": "duckduckgo",
+        "publishedDate": "2026-09-05T14:30:00Z",
+        "author": "John Smith"
+      }
+    ],
+    "query": "LLM AI model release 2026",
+    "number_of_results": 2
+  }
+}

@@ -1,0 +1,147 @@
+name: Bug report
+description: Report a defect in the news-core public export surface.
+title: "[bug] "
+labels: ["type:bug", "area:public-surface"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Stop and read SECURITY.md first** if this report describes a
+        vulnerability, a leaked credential, a host identifier, a private
+        endpoint, or anything that should not be public.  Public
+        GitHub issues are not the right channel for vulnerability
+        disclosure.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: "Summary"
+      description: "One sentence: what broke, and what you observed."
+      placeholder: |
+        Example: Verifying compose.canary.yaml reports a findings line
+        even when no secrets are mounted.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: "Reproduction"
+      description: |
+        Minimal recipe. Include the exact commands, container flags, or
+        inputs you used. Strip host paths, private endpoints, chat
+        identifiers, and credentials before pasting.
+      placeholder: |
+        1. python3 scripts/check_publication_safety.py .
+        2. observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: "Expected behavior"
+      description: "What you expected to happen."
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: "Actual behavior"
+      description: |
+        What actually happened. Paste the relevant log lines or output
+        verbatim, but redact any path that identifies your host.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: "news-core version / image tag"
+      description: |
+        Output of `git describe --tags --always`, or the image label
+        `org.opencontainers.image.revision`.
+      placeholder: "v0.0.0-3-abcdef0"
+    validations:
+      required: true
+
+  - type: input
+    id: python_version
+    attributes:
+      label: "Python version"
+      description: "Output of `python3 -V`."
+      placeholder: "Python 3.11.x"
+    validations:
+      required: true
+
+  - type: input
+    id: container_runtime
+    attributes:
+      label: "Container runtime"
+      description: "Docker Engine / Compose v2 version, or 'no docker available'."
+    validations:
+      required: false
+
+  - type: input
+    id: host_os
+    attributes:
+      label: "Host OS"
+      description: |
+        Output of `uname -srm` or your distribution's equivalent.
+        Do NOT paste a hostname.
+    validations:
+      required: true
+
+  - type: input
+    id: commit_sha
+    attributes:
+      label: "Branch / commit"
+      description: "Output of `git rev-parse HEAD`."
+      placeholder: "abcdef0123456789..."
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: local_checks
+    attributes:
+      label: "Local verification performed"
+      description: "Check the ones you ran. These are the same checks CI runs."
+      options:
+        - label: "scripts/check_publication_safety.py exits 0"
+          required: false
+        - label: "Focused publication-safety unittest suite passes"
+          required: false
+        - label: "python3 -m compileall -q scripts tests is silent"
+          required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Logs / minimal config"
+      description: |
+        Attach trimmed logs and a minimal config snippet. Strip
+        host paths, private endpoints, mesh-network references,
+        credential environment values, and chat identifiers before
+        pasting.
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: "Scope"
+      description: |
+        Pick the closest match. Out-of-scope items should be sent
+        through the operator channel rather than filed here.
+      options:
+        - label: |
+            This report is about behavior observable from the public
+            export surface only (code, docs, scanner, verifier,
+            focused unit tests).
+          required: true
+        - label: |
+            This report involves live operator configuration under
+            config/ or a host broker; it is out of scope for public
+            tracking and should be sent to the operator channel.
+          required: false

@@ -1,0 +1,5 @@
+{
+  "description": "Valid Atom 1.0 feed with two entries",
+  "feed_url": "https://example.com/feed.atom",
+  "response": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<feed xmlns=\"http://www.w3.org/2005/Atom\">\n  <title>Example Atom Feed</title>\n  <link href=\"https://example.com\" rel=\"alternate\"/>\n  <updated>2026-09-06T12:00:00Z</updated>\n  <entry>\n    <title>Atom Entry One</title>\n    <link href=\"https://example.com/entries/one\" rel=\"alternate\"/>\n    <id>https://example.com/entries/one</id>\n    <updated>2026-09-06T10:00:00Z</updated>\n    <summary>Summary of the first entry.</summary>\n    <author><name>Bob Author</name></author>\n  </entry>\n  <entry>\n    <title>Atom Entry Two</title>\n    <link href=\"https://example.com/entries/two\" rel=\"alternate\"/>\n    <id>https://example.com/entries/two</id>\n    <published>2026-09-05T08:00:00Z</published>\n    <content>Full content of the second entry.</content>\n  </entry>\n</feed>"
+}

@@ -1,0 +1,47 @@
+[build-system]
+# Stdlib-first build: no third-party build backend is required for the
+# runtime image. ``setuptools`` is only listed as a minimal, optional
+# fallback for environments that want to install the package.
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "news-core"
+version = "0.1.0"
+description = "Portable, future-public-news-pipeline core (no live delivery)."
+requires-python = ">=3.11"
+readme = "README.md"
+license = { file = "LICENSE" }
+classifiers = ["License :: OSI Approved :: MIT License"]
+# Intentionally empty: the runtime has zero third-party dependencies.
+# Any future optional adapter for an external scheduler or chat bridge
+# must live in an extras section, not the default install.
+dependencies = []
+
+# Optional downstream adapters only -- never any bundled scheduler
+# instance, chat-bot instance, or credential store.
+[project.optional-dependencies]
+downstream-bridge = []
+
+[project.scripts]
+news-tick = "news_pipeline.jobs:cli_tick"
+news-process = "news_pipeline.jobs:cli_process"
+news-daily-report = "news_pipeline.jobs:cli_daily_report"
+news-daily-close = "news_pipeline.jobs:cli_daily_close"
+news-health = "news_pipeline.jobs:cli_health"
+
+[tool.setuptools]
+# The package layout under ``scripts/`` is intentional: the runtime image
+# runs ``python -m news_pipeline.*`` and ``python -m news_container.*``
+# with PYTHONPATH=/app/scripts.
+package-dir = {"" = "scripts"}
+
+[tool.setuptools.packages.find]
+where = ["scripts"]
+
+# ---------------------------------------------------------------------------
+# Tooling: the public surface stays linter-clean, but no tool is required
+# to run the scanner or the unit tests. The publication gate uses the
+# stdlib ``unittest`` runner, not pytest, so the project remains usable
+# in minimal Python environments.
+# ---------------------------------------------------------------------------

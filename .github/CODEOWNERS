@@ -1,0 +1,3 @@
+# CODEOWNERS
+# The authenticated repository owner is the default reviewer for every path.
+* @carlkrott

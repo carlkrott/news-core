@@ -1,0 +1,9 @@
+{
+  "description": "SearXNG response with empty results array",
+  "query": "obscure+niche+query",
+  "response": {
+    "results": [],
+    "query": "obscure niche query",
+    "number_of_results": 0
+  }
+}

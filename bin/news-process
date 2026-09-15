@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+readonly CODE_ROOT="${NEWS_PIPELINE_CODE_ROOT:-/app}"
+export PYTHONPATH="$CODE_ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}"
+DB=${NEWS_PIPELINE_DB:-/state/news-state.db}
+ARGS=(--db "$DB")
+[[ -n "${NEWS_PIPELINE_EVALUATED_AT:-}" ]] && ARGS+=(--evaluated-at "$NEWS_PIPELINE_EVALUATED_AT")
+[[ -n "${NEWS_PIPELINE_HISTORY_DB:-}" ]] && ARGS+=(--history-db "$NEWS_PIPELINE_HISTORY_DB")
+[[ -n "${NEWS_PIPELINE_MAX_ITEMS:-}" ]] && ARGS+=(--max-items "$NEWS_PIPELINE_MAX_ITEMS")
+if [[ "${NEWS_PHASE6_ENABLE_PROCESS:-0}" == "1" ]]; then
+  ARGS+=(--enable-network)
+fi
+exec /usr/bin/python3 -m news_pipeline.jobs process "${ARGS[@]}"

@@ -1,0 +1,13 @@
+# Issue template chooser for news-core.
+#
+# Security reports must use GitHub private vulnerability reporting.
+# Bug reports and feature requests belong in the normal issue forms.
+
+blank_issues_enabled: false
+
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/carlkrott/news-core/security/advisories/new
+    about: |
+      Do not file a public issue. Use GitHub's private vulnerability
+      reporting channel described in SECURITY.md.

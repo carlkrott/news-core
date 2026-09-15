@@ -1,0 +1,9 @@
+{
+  "description": "SearXNG response with invalid JSON structure — results is a string",
+  "query": "test+query",
+  "response": {
+    "results": "not an array",
+    "query": "test query",
+    "number_of_results": 0
+  }
+}

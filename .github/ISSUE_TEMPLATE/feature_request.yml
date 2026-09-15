@@ -1,0 +1,100 @@
+name: Feature request
+description: Propose a behavior change in the news-core public surface.
+title: "[feature] "
+labels: ["type:enhancement", "area:public-surface"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Until the operator selects a license, the scope of accepted
+        features is intentionally narrow: anything that depends on a
+        license choice, introduces a third-party runtime dependency,
+        enables live delivery (Telegram, chat IDs, tokens), pushes an
+        image, or removes a publication-safety scanner reject must be
+        raised through the operator channel rather than filed here.
+        See CONTRIBUTING.md.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Problem statement"
+      description: |
+        What user-visible problem does this change solve? Avoid
+        proposing a solution here; describe the gap first.
+      placeholder: |
+        Example: the verifier cannot run on hosts without Docker, so
+        CI on a no-Docker runner skips the compose contract check.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: "Proposal"
+      description: |
+        What change would resolve the problem? List the files and
+        behaviors you expect to change.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Alternatives considered"
+      description: |
+        Other approaches you ruled out, and why. Skip this if the
+        proposal is self-contained.
+    validations:
+      required: false
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: "Risks and out-of-scope impact"
+      description: |
+        How does this interact with publication-safety, the
+        zero-runtime-deps rule, the no-live-delivery contract, and
+        the bounded allowlist under scripts/check_publication_safety.py?
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: contract
+    attributes:
+      label: "Constraint checklist"
+      description: |
+        Confirm the proposal stays within the publication surface.
+        Anything you cannot tick here must be deferred or sent to
+        the operator channel.
+      options:
+        - label: "No new third-party runtime dependency"
+          required: true
+        - label: "No new license claim (no SPDX header, no LICENSE file)"
+          required: true
+        - label: "Does not enable live delivery (Telegram, chat IDs, tokens)"
+          required: true
+        - label: "Does not push an image to a registry"
+          required: true
+        - label: "Stays within the publication-safety scanner allowlist"
+          required: true
+        - label: "Does not reference a downstream scheduler instance as bundled"
+          required: true
+
+  - type: textarea
+    id: tests
+    attributes:
+      label: "Tests / verification"
+      description: |
+        What new focused unittest cases or scanner checks will you
+        add?  Stdlib unittest only; pytest is not required.
+
+  - type: input
+    id: version
+    attributes:
+      label: "Targeted news-core version"
+      description: "Branch, tag, or commit SHA this proposal targets."
+      placeholder: "main"
+    validations:
+      required: false

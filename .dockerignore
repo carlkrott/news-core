@@ -1,0 +1,70 @@
+# Docker build context exclusions.
+# Keep the image lean: runtime image only carries scripts/news_pipeline,
+# scripts/news_container, sanitized runtime configs, and entrypoints.
+# Everything else below stays out of the build context entirely.
+
+# VCS metadata
+.git
+.gitignore
+.gitattributes
+
+# Tests / docs / host-only artifacts
+tests/
+docs/
+README.md
+ARCHITECTURE.md
+SECURITY.md
+CONTRIBUTING.md
+BUILD.md
+
+# Evidence / state / caches / bytecode
+private-evidence/
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# State databases, WAL/SHM sidecars, logs
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+**/*.sqlite3
+**/*.sqlite-wal
+**/*.sqlite3-wal
+**/*.log
+
+# Secrets / environment / keys / certs
+.env
+.env.*
+.envrc
+**/*.pem
+**/*.key
+**/*.crt
+**/*.cer
+**/*.pfx
+**/*.p12
+
+# Editor / OS
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+
+# Staging manifests and legacy runtime helpers
+STAGING_MANIFEST*
+staging_manifest*
+legacy-bin/
+
+# Source-tree configuration that is not part of the runtime image.
+# Only the .example.toml sanitized configs ship.
+config/news-policy.toml
+config/news-sources.toml
+config/news-topics.toml
+config/runtime-schedule.toml
+config/broker-policy.toml

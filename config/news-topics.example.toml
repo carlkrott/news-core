@@ -1,0 +1,52 @@
+# Public-export example topics.  Sanitized, placeholder copy.
+# Replace with your own categories.  No priority, ordering, or
+# trust decisions are asserted here.
+version = 1
+
+[[topics]]
+category = "ai"
+label = "AI & Stack"
+included_in_combined_report = true
+consequential_only = false
+
+[[topics]]
+category = "world"
+label = "World"
+included_in_combined_report = true
+consequential_only = true
+
+[[topics]]
+category = "audio_engineering"
+label = "Audio Engineering"
+included_in_combined_report = true
+consequential_only = false
+
+[[topics]]
+category = "hardware"
+label = "Computer Hardware"
+included_in_combined_report = true
+consequential_only = false
+
+[[topics]]
+category = "fantasy_novel"
+label = "Fantasy Novel Industry"
+included_in_combined_report = true
+consequential_only = false
+
+[[topics]]
+category = "audiovisual"
+label = "Audiovisual"
+included_in_combined_report = true
+consequential_only = false
+
+[[topics]]
+category = "av_corporate"
+label = "Corporate AV"
+included_in_combined_report = true
+consequential_only = false
+
+[[topics]]
+category = "our_setup"
+label = "Our Setup"
+included_in_combined_report = true
+consequential_only = false

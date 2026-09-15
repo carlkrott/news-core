@@ -1,0 +1,71 @@
+# User-service template for the host Unix-domain-socket news egress broker.
+#
+# Install (per role) on the operator workstation / dedicated host:
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/systemd/news-egress-broker@.service \
+#      ~/.config/systemd/user/news-egress-broker@.service
+#   cp deploy/systemd/news-egress-broker.env.example \
+#      ~/.config/systemd/user/news-egress-broker@search.env
+#   # repeat for feed, llm
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now news-egress-broker@search.service
+#
+# The unit is templated on the route name (``search``, ``feed``,
+# ``llm``) so a single file describes all three brokers.  Each
+# instance reads the non-secret policy path supplied by its environment
+# file and binds under the user manager's private runtime directory.
+#
+# SECURITY:
+# * The unit runs under the operator's user account, not as a
+#   privileged service. The broker drops privileges to ``--user`` /
+#   ``--group`` only when those flags are set; otherwise it runs
+#   under the calling user.
+# * No bearer tokens, chat IDs, or remote endpoints are configured
+#   here — those would belong in the policy file's ``[search]`` /
+#   ``[feed]`` / ``[llm]`` sections and must remain placeholders
+#   until the operator installs real values.
+# * Delivery (``delivery.sock``) is intentionally not enabled here.
+
+[Unit]
+Description=Host news egress broker (%i)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/systemd/user/news-egress-broker@%i.env
+RuntimeDirectory=news-pipeline-broker
+RuntimeDirectoryMode=0700
+UMask=0077
+ExecStart=/usr/bin/python3 ${NEWS_EGRESS_CODE_ROOT}/host/news_egress_broker.py \
+  --policy ${NEWS_EGRESS_POLICY_PATH} \
+  --route %i \
+  --socket %t/news-pipeline-broker/%i.sock
+Restart=on-failure
+RestartSec=5s
+# Hardening (best-effort; requires user@uid.service to be enabled).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%t/news-pipeline-broker
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+TasksMax=24
+LimitNOFILE=128
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# The listener is AF_UNIX; AF_INET/AF_INET6 are required for upstream fetches.
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+# Per-route log level can be set via env (NEWS_EGRESS_BROKER_LOG_LEVEL).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=news-egress-broker-%i
+
+[Install]
+WantedBy=default.target

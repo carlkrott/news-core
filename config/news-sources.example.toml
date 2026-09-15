@@ -1,0 +1,135 @@
+# Public-export example source registry.
+#
+# This is a sanitized, placeholder copy.  Replace the example hosts
+# with your own operators.  Do not publish real endpoints, tokens, or
+# source identifiers.
+#
+# The runtime contacts these hosts only through host-side Unix-domain
+# socket brokers; the brokers enforce a closed allowlist, HTTPS-only,
+# DNS/IP/redirect/private-address checks, and a normalized-port policy.
+#
+# Adapter types and roles are public; query text and category scopes are
+# illustrative and should be reviewed before publication.
+version = 1
+
+[[sources]]
+source_id = "example-discovery-ai"
+adapter_type = "searxng"
+source_role = "discovery"
+host = "search.example.com"
+category_scope = ["ai"]
+enabled = true
+cadence_minutes = 180
+[[sources.queries]]
+text = "LLM+AI+model+release+2026"
+categories = ["it", "news"]
+
+[[sources]]
+source_id = "example-feed-ai"
+adapter_type = "rss"
+source_role = "discovery"
+host = "feed.example.com"
+category_scope = ["ai"]
+enabled = true
+cadence_minutes = 60
+[[sources.queries]]
+text = "https://feed.example.com/news.xml"
+categories = ["news"]
+
+[[sources]]
+source_id = "example-discovery-world"
+adapter_type = "searxng"
+source_role = "discovery"
+host = "search.example.com"
+category_scope = ["world"]
+enabled = true
+cadence_minutes = 180
+[[sources.queries]]
+text = "world+news+today"
+categories = ["news"]
+
+[[sources]]
+source_id = "example-discovery-audio"
+adapter_type = "searxng"
+source_role = "discovery"
+host = "search.example.com"
+category_scope = ["audio_engineering"]
+enabled = true
+cadence_minutes = 360
+title_blocklist = [
+  "smart speaker",
+  "bluetooth speaker",
+  "wireless speaker",
+  "soundbar",
+  "earbuds",
+  "airpods",
+  "headphones review",
+  "iem review",
+  "in-ear",
+  "gaming headset",
+  "tv sound",
+  "home theater",
+]
+[[sources.queries]]
+text = "audio+engineering+technology+news"
+categories = ["news"]
+
+[[sources]]
+source_id = "example-discovery-hardware"
+adapter_type = "searxng"
+source_role = "discovery"
+host = "search.example.com"
+category_scope = ["hardware"]
+enabled = true
+cadence_minutes = 360
+[[sources.queries]]
+text = "computer+hardware+release"
+categories = ["it", "news"]
+
+[[sources]]
+source_id = "example-discovery-fantasy"
+adapter_type = "searxng"
+source_role = "discovery"
+host = "search.example.com"
+category_scope = ["fantasy_novel"]
+enabled = true
+cadence_minutes = 720
+[[sources.queries]]
+text = "fantasy+publishing+news"
+categories = ["news"]
+
+[[sources]]
+source_id = "example-discovery-audiovisual"
+adapter_type = "searxng"
+source_role = "discovery"
+host = "search.example.com"
+category_scope = ["audiovisual"]
+enabled = true
+cadence_minutes = 360
+[[sources.queries]]
+text = "audio+production+technology+news"
+categories = ["news"]
+
+[[sources]]
+source_id = "example-discovery-corporate-av"
+adapter_type = "searxng"
+source_role = "discovery"
+host = "search.example.com"
+category_scope = ["av_corporate"]
+enabled = true
+cadence_minutes = 360
+[[sources.queries]]
+text = "professional+AV+technology+news"
+categories = ["news"]
+
+[[sources]]
+source_id = "example-discovery-operations"
+adapter_type = "searxng"
+source_role = "discovery"
+host = "search.example.com"
+category_scope = ["our_setup"]
+enabled = true
+cadence_minutes = 720
+[[sources.queries]]
+text = "open-source+automation+agent+news"
+categories = ["news", "general"]

@@ -1,0 +1,5 @@
+{
+  "description": "Malformed RSS XML — missing channel element",
+  "feed_url": "https://example.com/bad-feed.rss",
+  "response": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<rss version=\"2.0\">\n  <not-a-channel>\n    <title>Missing Channel</title>\n  </not-a-channel>\n</rss>"
+}

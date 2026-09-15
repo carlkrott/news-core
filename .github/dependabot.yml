@@ -1,0 +1,49 @@
+# Dependabot configuration for news-core.
+#
+# Scoped to the two ecosystems present in this repository:
+#   * github-actions: tracks the small set of actions referenced by the
+#           workflows.
+#   * docker: tracks the digest-pinned Python base image in Dockerfile.
+#
+# This file MUST NOT be widened to npm, pip, or composer: those ecosystems
+# are not runtime dependencies of this repository and adding them would
+# generate noisy PRs that touch nothing.
+#
+# The repository is delivery-disabled by default and has no image
+# registry; no `package-ecosystem: docker` entry is included.
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "ci(actions)"
+    labels:
+      - "dependencies"
+      - "area:ci"
+    groups:
+      patch-and-security:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "deps(docker)"
+    labels:
+      - "dependencies"
+      - "area:container"

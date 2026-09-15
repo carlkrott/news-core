@@ -1,0 +1,24 @@
+{
+  "description": "SearXNG response missing required url field in second result",
+  "query": "test+query",
+  "response": {
+    "results": [
+      {
+        "url": "https://example.com/valid-result",
+        "title": "Valid Result",
+        "content": "This result is valid."
+      },
+      {
+        "title": "Missing URL",
+        "content": "This result has no URL field."
+      },
+      {
+        "url": "https://example.com/third-result",
+        "title": "Third Result",
+        "content": "This result is also valid."
+      }
+    ],
+    "query": "test query",
+    "number_of_results": 3
+  }
+}

@@ -1,0 +1,81 @@
+# Example policy for the host Unix-domain-socket news egress broker.
+#
+# This file is loaded by ``python -m host.news_egress_broker`` at
+# start-up. Replace the placeholders below with the operator's actual
+# origins before deploying. Schema version 1 and all route tables are
+# required; limit fields retain bounded defaults.
+# The schema is fully documented inline below. The broker rejects
+# unknown top-level sections and unknown keys, so any typo is caught
+# at start-up.
+
+version = 1
+log_level = "INFO"
+
+# ----------------------------------------------------------------------
+# [common] — limits that apply to every route.
+# ----------------------------------------------------------------------
+# All caps are hard ceilings; values above them are refused.
+#
+# max_request_bytes  — cap on the inbound JSON envelope (the HTTP body
+#                       on the broker socket). Hard ceiling 65536.
+#                       Default: 65536.
+# max_response_bytes — cap on the upstream response body. Hard ceiling
+#                       8 MiB. Default: 2 MiB.
+# timeout_seconds    — per-upstream connect + read timeout. Hard ceiling
+#                       120 s. Default: 15 s.
+# max_concurrency    — cap on concurrent in-flight requests. Hard ceiling
+#                       256. Default: 16.
+
+[common]
+max_request_bytes = 65536
+max_response_bytes = 2097152
+timeout_seconds = 15.0
+max_concurrency = 16
+
+# ----------------------------------------------------------------------
+# [search] — fixed-origin SearXNG-style search.
+# ----------------------------------------------------------------------
+# Search ignores the caller's ``target_url`` scheme + host and always
+# issues its call against ``base_url``. Only the path (``/search``)
+# and query string from the envelope are honoured.
+#
+# base_url — http:// URL with a hostname. Loopback is recommended for
+#            canary deployments. No explicit port allowed by the
+#            default policy file format, but the broker accepts a
+#            port (see ``host/news_egress_broker.py``).
+
+[search]
+base_url = "http://localhost:8888"
+
+# ----------------------------------------------------------------------
+# [feed] — closed-allowlist RSS / Atom fetcher with SSRF guards.
+# ----------------------------------------------------------------------
+# Every caller ``target_url`` is matched against the allowlist. The
+# broker also re-resolves the host and rejects any address in
+# loopback / RFC1918 / link-local / CGNAT / multicast / unspecified
+# ranges. Redirects are followed manually up to ``max_redirects``
+# hops, each hop revalidated.
+
+[feed]
+# Bare hostnames only (no scheme, no path, no port). Lowercased by
+# the broker.
+allowed_hosts = [
+  "example.com",
+  "feeds.example.org",
+]
+max_redirects = 3
+
+# ----------------------------------------------------------------------
+# [llm] — fixed-origin, forced-model LLM chat-completions call.
+# ----------------------------------------------------------------------
+# The broker always uses ``base_url`` + ``path`` (default
+# ``/v1/chat/completions``) and forces ``model`` to the value below.
+# The caller cannot override ``model``. The caller's JSON body is
+# merged in, but ``stream: true`` is rejected.
+
+[llm]
+base_url = "http://localhost:8095"
+path = "/v1/chat/completions"
+# Forced model — pick the operator's local model identifier.
+model = "local-llm-v1"
+max_response_bytes = 4194304

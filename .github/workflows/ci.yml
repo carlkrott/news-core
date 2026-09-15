@@ -1,0 +1,192 @@
+# Local-only CI for news-core.
+#
+# This workflow is intentionally bounded:
+#   * No live host access, no broker sockets mounted.
+#   * No live state or credential material.
+#   * No image build, push, or deployment.
+#   * No downstream scheduler instance is bundled.
+#
+# Python 3.11 baseline with PYTHONDONTWRITEBYTECODE=1 and
+# PYTHONPATH=${{ github.workspace }}/scripts to match the runtime image
+# layout (see BUILD.md and Dockerfile).
+name: ci
+
+"on":
+  pull_request:
+  push:
+    branches:
+      - main
+      - "topic/**"
+  workflow_dispatch:
+
+# Avoid stepping on any fork-pull-request secrets/permissions by being
+# explicit: read-only contents, no id-token, no packages.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-scan:
+    name: publication-safety scan
+    runs-on: ubuntu-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: ${{ github.workspace }}/scripts
+    steps:
+      - name: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: set up Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+          check-latest: false
+
+      - name: run publication-safety scanner
+        # Stdlib-only; no broker sockets, no credentials, no Telegram IDs.
+        run: |
+          python3 scripts/check_publication_safety.py .
+
+  compile-and-syntax:
+    name: compile + shell-syntax
+    runs-on: ubuntu-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: ${{ github.workspace }}/scripts
+    steps:
+      - name: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: set up Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+          check-latest: false
+
+      - name: compile-check python sources
+        # Stdlib compileall of the application core + tests, matching the
+        # portable verification path documented in README.md / BUILD.md.
+        run: python3 -m compileall -q scripts tests
+
+      - name: shell-syntax check (bin/)
+        run: |
+          set -euo pipefail
+          bash -n bin/news-tick bin/news-process bin/news-health \
+                 bin/news-daily-report bin/news-daily-close \
+                 bin/container-entrypoint
+
+  focused-tests:
+    name: focused unittest + contract checks
+    runs-on: ubuntu-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: ${{ github.workspace }}/scripts
+      # Force the publication-safety tests to run in their stdlib
+      # unittest mode; pytest is intentionally not required.
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+    steps:
+      - name: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: set up Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+          check-latest: false
+
+      - name: focused publication-safety tests
+        # Mirrors the "publication-safety" check documented in README.md.
+        run: |
+          python3 -m unittest discover -s tests/news_pipeline \
+            -p test_publication_safety.py -v
+
+      - name: focused container contract tests
+        run: |
+          python3 -m unittest discover -s tests/news_pipeline \
+            -p test_container_contract.py -v
+
+  image-smoke:
+    name: build and inspect disposable image
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: news-core:ci-${{ github.sha }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: build local image
+        run: |
+          set -euo pipefail
+          docker build --pull --tag "$IMAGE" \
+            --build-arg OCI_SOURCE="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --build-arg OCI_REVISION="$GITHUB_SHA" \
+            --build-arg OCI_VERSION="ci-${GITHUB_RUN_NUMBER}" \
+            --build-arg OCI_LICENSE="MIT" \
+            --build-arg OCI_VENDOR="news-core" .
+
+      - name: inspect image contract and import closure
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Config.User}}' "$IMAGE")" = "ncnrun"
+          test "$(docker image inspect --format '{{json .Config.ExposedPorts}}' "$IMAGE")" = "null"
+          test "$(docker image inspect --format '{{ index .Config.Labels \"org.opencontainers.image.revision\" }}' "$IMAGE")" = "$GITHUB_SHA"
+          test "$(docker image inspect --format '{{ index .Config.Labels \"news.container.delivery_disabled\" }}' "$IMAGE")" = "true"
+          docker run --rm --entrypoint /usr/local/bin/python3 --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:size=64m,noexec,nosuid,nodev \
+            -e PYTHONDONTWRITEBYTECODE=1 "$IMAGE" \
+            -c 'import news_pipeline, news_container'
+
+  compose-config-render:
+    name: compose config render (no secrets)
+    runs-on: ubuntu-latest
+    env:
+      NEWS_BROKER_SOCKET_DIR: /tmp/news-brokers
+      NEWS_CANARY_HOST_ROOT: /tmp/news-canary
+      NEWS_CONTAINER_IMAGE: news-core:ci
+      NEWS_CONTAINER_SCHEDULER_AT: 2026-01-01T00:00:00Z
+    steps:
+      - name: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: docker compose config (canary)
+        # Render the complete topology plus canary overlay without
+        # resolving credentials or contacting a broker.
+        run: |
+          set -euo pipefail
+          docker compose -f compose.yaml -f compose.canary.yaml config \
+            --format json > /tmp/compose-rendered.json
+          test -s /tmp/compose-rendered.json
+
+  verifier:
+    name: verify_container_contract (python-side)
+    runs-on: ubuntu-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: ${{ github.workspace }}/scripts
+    steps:
+      - name: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: set up Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+          check-latest: false
+
+      - name: run verifier
+        # stdlib verifier; performs no I/O outside the candidate tree and
+        # does not require docker to be installed.
+        run: |
+          python3 scripts/verify_container_contract.py --candidate-root .

@@ -1,0 +1,65 @@
+# Example runtime schedule for the news container Compose services.
+#
+# The scheduler parses this file at start-up.  ``due_local`` is a
+# Europe/London clock time (DST-aware via zoneinfo); the scheduler
+# converts every entry to a UTC-Z due slot and enqueues a task in
+# the control store keyed by (kind, due_slot_utc).  Re-enqueueing
+# the same (kind, due_slot) is a no-op, which is why the schedule can
+# be re-applied on every container restart.
+#
+# Allowed ``kind`` values are exactly: ``ingest``, ``process``,
+# ``validate``, ``report``.  ``delivery`` is refused at every layer.
+#
+# Notes:
+# * The validate sweep runs after the delivery-disabled shadow report so a
+#   daily canary audit always sees the latest state.  It is not a
+#   live delivery — it only inspects the control DB.
+# * ``weekdays`` accepts ISO weekday abbreviations: mon..sun.
+
+[schedule.phase6_ingest]
+kind = "ingest"
+hours = "all"
+minutes = [0, 15, 30, 45]
+weekdays = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+enabled = true
+notes = "Matches the current delivery-disabled Phase 6 15-minute ingest cadence."
+
+[schedule.phase6_ingest.payload]
+sources = "/app/config/news-sources.toml"
+topics = "/app/config/news-topics.toml"
+policy = "/app/config/news-policy.toml"
+
+[schedule.phase6_process]
+kind = "process"
+hours = "all"
+minutes = [10, 30, 50]
+weekdays = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+enabled = true
+notes = "Matches the current Phase 6 process cadence."
+
+[schedule.phase6_process.payload]
+max_items = 500
+
+[schedule.morning_process_drain]
+kind = "process"
+due_local = "06:45"
+weekdays = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+enabled = true
+notes = "Matches the current final morning process drain."
+
+[schedule.morning_process_drain.payload]
+max_items = 500
+
+[schedule.shadow_report]
+kind = "report"
+due_local = "08:05"
+weekdays = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+enabled = true
+notes = "Delivery-disabled daily report; no Telegram credential is mounted."
+
+[schedule.daily_validate]
+kind = "validate"
+due_local = "08:10"
+weekdays = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+enabled = true
+notes = "Daily canary validation: integrity, FK, schema, zero-delivery."

@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# container-entrypoint: dispatch one role exec from $NEWS_CONTAINER_ROLE.
+#
+# Roles:
+#   scheduler      -> python -m news_container.scheduler once|loop
+#   ingest         -> python -m news_container.worker --kind ingest
+#   process        -> python -m news_container.worker --kind process
+#   validate       -> python -m news_container.worker --kind validate
+#   report         -> python -m news_container.worker --kind report
+#
+# Fail-closed sentinels (any one present aborts the process before exec):
+#   NEWS_PHASE6_ENABLE_LIVE_DELIVERY=1
+#   NEWS_PHASE6_ENABLE_NETWORK=1        (ingest/process use only via broker)
+#   NEWS_BRIEFING_TELEGRAM_API_BASE set (forbidden in any canary role)
+#   NEWS_CONTAINER_PRODUCTION=1         (worker already refuses this; we
+#                                       refuse even the dispatcher)
+#
+# The entrypoint never reaches outside /app / /state / /artifacts.  The
+# caller (compose) is expected to mount /state and /artifacts read-write,
+# and /app read-only.
+set -euo pipefail
+
+readonly ROLE="${NEWS_CONTAINER_ROLE:-${1:-}}"
+
+if [[ -z "${ROLE}" ]]; then
+  printf 'container-entrypoint: NEWS_CONTAINER_ROLE is required\n' >&2
+  exit 64
+fi
+
+case "${ROLE}" in
+  scheduler|ingest|process|validate|report) ;;
+  *)
+    printf 'container-entrypoint: unknown role %s\n' "${ROLE}" >&2
+    exit 64
+    ;;
+esac
+
+# Fail closed on any delivery sentinel.
+if [[ "${NEWS_PHASE6_ENABLE_LIVE_DELIVERY:-0}" == "1" ]]; then
+  printf 'container-entrypoint: refused, NEWS_PHASE6_ENABLE_LIVE_DELIVERY=1\n' >&2
+  exit 77
+fi
+if [[ "${NEWS_CONTAINER_PRODUCTION:-0}" == "1" ]]; then
+  printf 'container-entrypoint: refused, NEWS_CONTAINER_PRODUCTION=1\n' >&2
+  exit 77
+fi
+if [[ -n "${NEWS_BRIEFING_TELEGRAM_API_BASE:-}" ]]; then
+  printf 'container-entrypoint: refused, NEWS_BRIEFING_TELEGRAM_API_BASE is set\n' >&2
+  exit 77
+fi
+if [[ -n "${TELEGRAM_BOT_TOKEN:-}" || -n "${TELEGRAM_CHAT_ID:-}" ]]; then
+  printf 'container-entrypoint: refused, telegram credential env present\n' >&2
+  exit 77
+fi
+
+export NEWS_CONTAINER_MODE=1
+export PYTHONPATH="/app/scripts${PYTHONPATH:+:$PYTHONPATH}"
+
+case "${ROLE}" in
+  scheduler)
+    # Loop or once depending on $NEWS_CONTAINER_SCHEDULER_MODE.
+    mode="${NEWS_CONTAINER_SCHEDULER_MODE:-once}"
+    case "${mode}" in
+      once|loop) ;;
+      *)
+        printf 'container-entrypoint: scheduler mode must be once|loop (got %s)\n' "${mode}" >&2
+        exit 64
+        ;;
+    esac
+    extra_args=()
+    if [[ "${mode}" == "loop" ]]; then
+      [[ -n "${NEWS_CONTAINER_SCHEDULER_MAX_ITERATIONS:-}" ]] \
+        && extra_args+=(--max-iterations "${NEWS_CONTAINER_SCHEDULER_MAX_ITERATIONS}")
+      [[ -n "${NEWS_CONTAINER_SCHEDULER_SLEEP_CAP:-}" ]] \
+        && extra_args+=(--sleep-cap-seconds "${NEWS_CONTAINER_SCHEDULER_SLEEP_CAP}")
+    else
+      [[ -n "${NEWS_CONTAINER_SCHEDULER_AT:-}" ]] \
+        || { printf 'container-entrypoint: once requires NEWS_CONTAINER_SCHEDULER_AT\n' >&2; exit 64; }
+      extra_args+=(--at "${NEWS_CONTAINER_SCHEDULER_AT}")
+    fi
+    exec /usr/bin/python3 -m news_container.scheduler "${mode}" \
+      --schedule "${NEWS_CONTAINER_SCHEDULE:-/app/config/runtime-schedule.example.toml}" \
+      --db       "${NEWS_CONTAINER_CONTROL_DB:-/state/runtime-control.db}" \
+      "${extra_args[@]}"
+    ;;
+  ingest|process|validate|report)
+    : "${NEWS_CONTAINER_CONTROL_DB:?NEWS_CONTAINER_CONTROL_DB is required}"
+    : "${NEWS_CONTAINER_STATE_DB:?NEWS_CONTAINER_STATE_DB is required}"
+    : "${NEWS_CONTAINER_ARTIFACT_ROOT:?NEWS_CONTAINER_ARTIFACT_ROOT is required}"
+    : "${NEWS_CONTAINER_LOCK_PATH:?NEWS_CONTAINER_LOCK_PATH is required}"
+    : "${NEWS_CONTAINER_OWNER:?NEWS_CONTAINER_OWNER is required}"
+
+    extra=()
+    [[ -n "${NEWS_CONTAINER_CLAIM_TTL:-}" ]] \
+      && extra+=(--claim-ttl-seconds "${NEWS_CONTAINER_CLAIM_TTL}")
+    [[ -n "${NEWS_CONTAINER_MAX_ITERATIONS:-}" ]] \
+      && extra+=(--max-iterations "${NEWS_CONTAINER_MAX_ITERATIONS}")
+    [[ -n "${NEWS_CONTAINER_CANARY_ROOT:-}" ]] \
+      && extra+=(--canary-root "${NEWS_CONTAINER_CANARY_ROOT}")
+    [[ -n "${NEWS_CONTAINER_SCHEDULE:-}" ]] \
+      && extra+=(--schedule "${NEWS_CONTAINER_SCHEDULE}")
+    if [[ "${NEWS_CONTAINER_BOOTSTRAP_ONCE:-0}" == "1" ]]; then
+      : "${NEWS_CONTAINER_BOOTSTRAP_AT:?NEWS_CONTAINER_BOOTSTRAP_AT required with NEWS_CONTAINER_BOOTSTRAP_ONCE=1}"
+      extra+=(--bootstrap-once --bootstrap-at "${NEWS_CONTAINER_BOOTSTRAP_AT}")
+    fi
+
+    exec /usr/bin/python3 -m news_container.worker \
+      --kind         "${ROLE}" \
+      --control-db   "${NEWS_CONTAINER_CONTROL_DB}" \
+      --state-db     "${NEWS_CONTAINER_STATE_DB}" \
+      --artifact-root "${NEWS_CONTAINER_ARTIFACT_ROOT}" \
+      --lock-path    "${NEWS_CONTAINER_LOCK_PATH}" \
+      --owner        "${NEWS_CONTAINER_OWNER}" \
+      "${extra[@]}"
+    ;;
+esac

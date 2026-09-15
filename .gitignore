@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# Test / tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.cache/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# State, logs, evidence, runtime databases
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite3-wal
+*.log
+logs/
+state/
+artifacts/
+reports/
+private-evidence/
+
+# Environment / secrets / keys / certs -- never published.
+.env
+.env.*
+.envrc
+*.pem
+*.key
+*.crt
+*.cer
+*.pfx
+*.p12
+credentials*
+secrets*
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Staging manifests
+STAGING_MANIFEST*
+staging_manifest*
+
+# Legacy runtime artifacts
+legacy-bin/

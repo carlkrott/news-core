@@ -1,0 +1,154 @@
+# Delivery-disabled, no-network news runtime.
+# Host directories must be created explicitly before Compose is run;
+# Compose is forbidden from inventing deployment state paths.
+
+name: news-pipeline-container
+
+x-hardening: &hardening
+  user: "${NEWS_CONTAINER_UID:-65532}:${NEWS_CONTAINER_GID:-65532}"
+  network_mode: none
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 64
+  cpus: 1.0
+  mem_limit: 768m
+  tmpfs:
+    - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
+  init: true
+  restart: "no"
+
+x-canary-volume: &canary-volume
+  type: bind
+  source: ${NEWS_CANARY_HOST_ROOT:-/srv/news-pipeline/canary}
+  target: /canary
+  bind:
+    create_host_path: false
+
+# Worker environment shared across ingest/process/validate/report.
+#
+# These five variables are REQUIRED by bin/container-entrypoint and
+# must exist in every worker Compose environment:
+#   NEWS_CONTAINER_CONTROL_DB, NEWS_CONTAINER_STATE_DB,
+#   NEWS_CONTAINER_ARTIFACT_ROOT, NEWS_CONTAINER_LOCK_PATH,
+#   NEWS_CONTAINER_OWNER.
+# NEWS_CONTAINER_CLAIM_TTL is the current TTL knob (worker --claim-ttl-seconds).
+# All paths stay under /canary so the bind mount owns them.
+x-worker-environment: &worker-environment
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+  NEWS_CONTAINER_MODE: "1"
+  NEWS_CONTAINER_CONTROL_DB: /canary/state/control/runtime-control.db
+  NEWS_CONTAINER_STATE_DB: /canary/state/main/news-state.db
+  NEWS_CONTAINER_ARTIFACT_ROOT: /canary/artifacts
+  NEWS_CONTAINER_LOCK_PATH: /canary/locks/news-state.db.lock
+  NEWS_CONTAINER_CANARY_ROOT: /canary
+  NEWS_CONTAINER_CLAIM_TTL: "120"
+  NEWS_CONTAINER_IDLE_SLEEP_SECONDS: "5"
+  NEWS_CONTAINER_MAX_ITERATIONS: "${NEWS_CONTAINER_WORKER_MAX_ITERATIONS:-0}"
+
+services:
+  scheduler:
+    <<: *hardening
+    image: ${NEWS_CONTAINER_IMAGE:-news-pipeline-container:local}
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      NEWS_CONTAINER_MODE: "1"
+      NEWS_CONTAINER_ROLE: scheduler
+      NEWS_CONTAINER_OWNER: scheduler
+      NEWS_CONTAINER_SCHEDULE: /app/config/runtime-schedule.toml
+      NEWS_CONTAINER_CONTROL_DB: /canary/state/control/runtime-control.db
+      # Base is deliberately once-only; a loop with the default zero
+      # iteration cap would be unbounded. Operators must provide an
+      # explicit timestamp rather than silently scheduling at startup.
+      NEWS_CONTAINER_SCHEDULER_MODE: once
+      NEWS_CONTAINER_SCHEDULER_AT: "${NEWS_CONTAINER_SCHEDULER_AT:?set NEWS_CONTAINER_SCHEDULER_AT}"
+      NEWS_CONTAINER_SCHEDULER_MAX_ITERATIONS: "1"
+      NEWS_CONTAINER_SCHEDULER_SLEEP_CAP: "${NEWS_CONTAINER_SCHEDULER_SLEEP_CAP:-30}"
+    volumes:
+      - *canary-volume
+    command: [scheduler]
+
+  ingest:
+    <<: *hardening
+    image: ${NEWS_CONTAINER_IMAGE:-news-pipeline-container:local}
+    environment:
+      <<: *worker-environment
+      NEWS_CONTAINER_ROLE: ingest
+      NEWS_CONTAINER_OWNER: ingest
+      NEWS_BROKER_SEARCH_SOCKET: /brokers/search.sock
+      NEWS_BROKER_FEED_SOCKET: /brokers/feed.sock
+    volumes:
+      - *canary-volume
+      - type: bind
+        source: ${NEWS_BROKER_SOCKET_DIR:?set NEWS_BROKER_SOCKET_DIR}
+        target: /brokers
+        read_only: true
+        bind:
+          create_host_path: false
+    command: [worker, ingest]
+
+  process:
+    <<: *hardening
+    image: ${NEWS_CONTAINER_IMAGE:-news-pipeline-container:local}
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      NEWS_CONTAINER_MODE: "1"
+      NEWS_CONTAINER_CONTROL_DB: /canary/state/control/runtime-control.db
+      NEWS_CONTAINER_STATE_DB: /canary/state/main/news-state.db
+      NEWS_CONTAINER_ARTIFACT_ROOT: /canary/artifacts
+      NEWS_CONTAINER_LOCK_PATH: /canary/locks/news-state.db.lock
+      NEWS_CONTAINER_CANARY_ROOT: /canary
+      NEWS_CONTAINER_CLAIM_TTL: "120"
+      NEWS_CONTAINER_IDLE_SLEEP_SECONDS: "5"
+      NEWS_CONTAINER_MAX_ITERATIONS: "${NEWS_CONTAINER_WORKER_MAX_ITERATIONS:-0}"
+      NEWS_CONTAINER_ROLE: process
+      NEWS_CONTAINER_OWNER: process
+    volumes:
+      - *canary-volume
+    command: [worker, process]
+
+  validate:
+    <<: *hardening
+    image: ${NEWS_CONTAINER_IMAGE:-news-pipeline-container:local}
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      NEWS_CONTAINER_MODE: "1"
+      NEWS_CONTAINER_CONTROL_DB: /canary/state/control/runtime-control.db
+      NEWS_CONTAINER_STATE_DB: /canary/state/main/news-state.db
+      NEWS_CONTAINER_ARTIFACT_ROOT: /canary/artifacts
+      NEWS_CONTAINER_LOCK_PATH: /canary/locks/news-state.db.lock
+      NEWS_CONTAINER_CANARY_ROOT: /canary
+      NEWS_CONTAINER_CLAIM_TTL: "120"
+      NEWS_CONTAINER_IDLE_SLEEP_SECONDS: "5"
+      NEWS_CONTAINER_MAX_ITERATIONS: "${NEWS_CONTAINER_WORKER_MAX_ITERATIONS:-0}"
+      NEWS_CONTAINER_ROLE: validate
+      NEWS_CONTAINER_OWNER: validate
+    volumes:
+      - *canary-volume
+    command: [worker, validate]
+
+  report:
+    <<: *hardening
+    image: ${NEWS_CONTAINER_IMAGE:-news-pipeline-container:local}
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      NEWS_CONTAINER_MODE: "1"
+      NEWS_CONTAINER_CONTROL_DB: /canary/state/control/runtime-control.db
+      NEWS_CONTAINER_STATE_DB: /canary/state/main/news-state.db
+      NEWS_CONTAINER_ARTIFACT_ROOT: /canary/artifacts
+      NEWS_CONTAINER_LOCK_PATH: /canary/locks/news-state.db.lock
+      NEWS_CONTAINER_CANARY_ROOT: /canary
+      NEWS_CONTAINER_CLAIM_TTL: "120"
+      NEWS_CONTAINER_IDLE_SLEEP_SECONDS: "5"
+      NEWS_CONTAINER_MAX_ITERATIONS: "${NEWS_CONTAINER_WORKER_MAX_ITERATIONS:-0}"
+      NEWS_CONTAINER_ROLE: report
+      NEWS_CONTAINER_OWNER: report
+    volumes:
+      - *canary-volume
+    command: [worker, report]

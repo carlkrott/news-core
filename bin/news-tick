@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+readonly CODE_ROOT="${NEWS_PIPELINE_CODE_ROOT:-/app}"
+export PYTHONPATH="$CODE_ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}"
+DB=${NEWS_PIPELINE_DB:-/state/news-state.db}
+ARGS=(--db "$DB")
+[[ -n "${NEWS_PIPELINE_SOURCES:-}" ]] && ARGS+=(--sources "$NEWS_PIPELINE_SOURCES")
+[[ -n "${NEWS_PIPELINE_TOPICS:-}" ]] && ARGS+=(--topics "$NEWS_PIPELINE_TOPICS")
+[[ -n "${NEWS_PIPELINE_POLICY:-}" ]] && ARGS+=(--policy "$NEWS_PIPELINE_POLICY")
+[[ -n "${NEWS_PIPELINE_RUN_STARTED_AT:-}" ]] && ARGS+=(--run-started-at "$NEWS_PIPELINE_RUN_STARTED_AT")
+[[ -n "${NEWS_PIPELINE_MAX_QUERIES:-}" ]] && ARGS+=(--max-queries "$NEWS_PIPELINE_MAX_QUERIES")
+if [[ "${NEWS_PHASE6_ENABLE_NETWORK:-0}" == "1" ]]; then
+  ARGS+=(--enable-network)
+fi
+exec /usr/bin/python3 -m news_pipeline.jobs tick "${ARGS[@]}"

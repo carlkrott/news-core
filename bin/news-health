@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+readonly CODE_ROOT="${NEWS_PIPELINE_CODE_ROOT:-/app}"
+export PYTHONPATH="$CODE_ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}"
+DB=${NEWS_PIPELINE_DB:-/state/news-state.db}
+exec /usr/bin/python3 -m news_pipeline.jobs health --db "$DB"

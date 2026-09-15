@@ -1,0 +1,51 @@
+# Canary overlay for the delivery-disabled news runtime.
+#
+# This file is *additive* on top of compose.yaml.  Each service block
+# here only sets the variables the canary needs to override; every
+# other env entry from compose.yaml is preserved verbatim.
+#
+# Canary discipline (Task 6 + Task 8 contract):
+#   * delivery stays disabled (no `--enable-live-delivery` env,
+#     no Telegram env, no delivery.sock mount)
+#   * worker max-iterations are bounded to 1 so a misfire cannot loop
+#   * scheduler runs once at a fixed UTC instant; no unbounded loop
+#   * canary root and broker socket directory default to a versioned
+#     staging root outside production state
+#   * no published ports; the canary does not override sandbox flags
+#
+# Compose v5 caveat: a nested ``environment:`` map on the same
+# service REPLACES the base environment instead of merging it.  We
+# therefore list every canary-specific override as its own top-level
+# key under each service, and rely on the base file to provide the
+# required variables.
+
+name: news-pipeline-container-canary
+
+services:
+
+  scheduler:
+    environment:
+      # Once-only execution in the canary; no loop, no sleep cap.
+      NEWS_CONTAINER_SCHEDULER_MODE: once
+      NEWS_CONTAINER_SCHEDULER_AT: "2026-01-01T00:00:00Z"
+      NEWS_CONTAINER_SCHEDULER_MAX_ITERATIONS: "1"
+
+  ingest:
+    environment:
+      NEWS_CONTAINER_MAX_ITERATIONS: "1"
+      NEWS_BROKER_SEARCH_SOCKET: "${NEWS_CANARY_BROKER_SEARCH_SOCK:-/brokers/search.sock}"
+      NEWS_BROKER_FEED_SOCKET: "${NEWS_CANARY_BROKER_FEED_SOCK:-/brokers/feed.sock}"
+
+  process:
+    environment:
+      NEWS_CONTAINER_MAX_ITERATIONS: "1"
+
+  validate:
+    environment:
+      NEWS_CONTAINER_MAX_ITERATIONS: "1"
+
+  report:
+    environment:
+      NEWS_CONTAINER_MAX_ITERATIONS: "1"
+      # Report role explicitly does not pass NEWS_PHASE6_ENABLE_LIVE_DELIVERY.
+      NEWS_CONTAINER_REPORT_DRY_RUN: "1"

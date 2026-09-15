@@ -1,0 +1,38 @@
+# Normalize line endings to LF; this repo intentionally ships no CRLF artifacts.
+* text=auto eol=lf
+
+# Python sources must keep LF line endings and never get CRLF rewrites.
+*.py text eol=lf
+
+# Markdown and configuration should be plain text.
+*.md text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+
+# Shell wrappers are LF and must remain executable.
+*.sh text eol=lf
+
+# Binary blobs: do not touch.
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+
+# Generated / vendored artifacts must never be re-diffed by line-ending
+# normalization.
+private-evidence/** binary
+*.db-wal binary
+*.db-shm binary
+*.sqlite-wal binary
+*.sqlite3-wal binary
+
+# Prevent git from silently rewriting the publication-safety checker or
+# the unit test file -- both must remain byte-stable for hashing.
+scripts/check_publication_safety.py -diff
+tests/news_pipeline/test_publication_safety.py -diff
