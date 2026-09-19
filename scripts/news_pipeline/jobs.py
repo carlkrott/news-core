@@ -21,6 +21,7 @@ def _parser() -> argparse.ArgumentParser:
     tick.add_argument("--sources")
     tick.add_argument("--topics")
     tick.add_argument("--policy")
+    tick.add_argument("--provenance")
     tick.add_argument("--run-started-at")
     tick.add_argument("--source-id", action="append", dest="source_ids")
     tick.add_argument("--max-queries", type=int)
@@ -92,6 +93,7 @@ def _run_tick(args: argparse.Namespace) -> int:
         report = run_ingest_sync(
             args.db, args.sources, args.topics, args.policy, args.run_started_at,
             source_ids=tuple(args.source_ids) if args.source_ids else None,
+            provenance_path=args.provenance,
             max_queries=args.max_queries,
             transport_factory=transport_factory,
         )

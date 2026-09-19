@@ -1,0 +1,43 @@
+# Sanitized publisher provenance examples only.
+# Live source rules belong in a private operator configuration and must not be published.
+version = 1
+
+[[publishers]]
+rule_id = "manufacturer-example"
+host = "manufacturer.example.com"
+source_role = "primary"
+independence_group = "manufacturer-example"
+categories = ["ai", "hardware"]
+authority_entities = ["Example Manufacturer"]
+enabled = true
+audit_note = "First-party authority only for the named manufacturer entity."
+
+[[publishers]]
+rule_id = "trade-example"
+host = "trade.example.com"
+source_role = "specialist"
+independence_group = "trade-example"
+categories = ["ai", "hardware"]
+authority_entities = []
+enabled = true
+audit_note = "Specialist trade publication; never primary."
+
+[[publishers]]
+rule_id = "neutral-example"
+host = "neutral.example.com"
+source_role = "neutral"
+independence_group = "neutral-example"
+categories = ["ai", "hardware"]
+authority_entities = []
+enabled = true
+audit_note = "Independent neutral source example."
+
+[[publishers]]
+rule_id = "syndicate-example"
+host = "syndicate.example.com"
+source_role = "specialist"
+independence_group = "trade-example"
+categories = ["ai", "hardware"]
+authority_entities = []
+enabled = true
+audit_note = "Syndicated family shares the trade-example independence group."

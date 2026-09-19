@@ -13,7 +13,7 @@
 #     is pulled.
 #   * Runtime tree is the union of /app/scripts/news_pipeline,
 #     /app/scripts/news_container, bin/* entrypoints, and the sanitized
-#     example runtime schedule. Tests, docs, host brokers, private
+#     example runtime configuration. Tests, docs, host brokers, private
 #     evidence, legacy wrappers, cache files, and staging manifests
 #     are excluded by the explicit COPY list below.
 #   * Default user is non-root. No published ports, no network
@@ -62,6 +62,7 @@ WORKDIR /app
 COPY scripts/news_pipeline /app/scripts/news_pipeline
 COPY scripts/news_container /app/scripts/news_container
 COPY config/news-policy.example.toml /app/config/news-policy.toml
+COPY config/news-provenance.example.toml /app/config/news-provenance.toml
 COPY config/news-sources.example.toml /app/config/news-sources.toml
 COPY config/news-topics.example.toml /app/config/news-topics.toml
 COPY config/runtime-schedule.example.toml /app/config/runtime-schedule.toml

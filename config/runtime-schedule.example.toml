@@ -28,6 +28,7 @@ notes = "Matches the current delivery-disabled Phase 6 15-minute ingest cadence.
 sources = "/app/config/news-sources.toml"
 topics = "/app/config/news-topics.toml"
 policy = "/app/config/news-policy.toml"
+provenance = "/app/config/news-provenance.toml"
 
 [schedule.phase6_process]
 kind = "process"

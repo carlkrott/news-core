@@ -11,7 +11,7 @@ from .event_contracts import FactKind, TypedFact
 from .fact_extraction import extract_facts
 from .live_contracts import (
     ClaimContract, ClaimStatus, EvidenceContract, EvidenceRole,
-    ObservationContract, ObservationKind, stable_id,
+    ObservationContract, ObservationKind, SourceRole, stable_id,
 )
 
 
@@ -64,16 +64,47 @@ def observation_from_source_item(row: Mapping[str, object]) -> ObservationContra
         if type(value) is not str or not value.strip():
             raise ValueError(f"source item {name} must be non-empty text")
         return value
+
+    role_value = row.get("effective_source_role") or SourceRole.DISCOVERY.value
+    try:
+        effective_source_role = SourceRole(role_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("source item effective_source_role is invalid") from exc
+    authority_value = row.get("authority_match")
+    if authority_value is None:
+        authority_value = False
+    if authority_value not in (0, 1, False, True):
+        raise ValueError("source item authority_match must be boolean")
+    publisher = text("publisher")
+    assert publisher is not None
+    has_provenance = any(
+        name in row
+        for name in (
+            "normalized_publisher_host", "effective_source_role", "independence_group",
+            "matched_rule_id", "authority_match", "classification_reason",
+        )
+    )
+    independence_group = (
+        text("independence_group", True) or "unknown"
+        if has_provenance
+        else publisher.casefold()
+    )
     return ObservationContract(
         observation_id=text("source_item_id"), source_id=text("source_id"),
         category=text("category"), kind=ObservationKind.PARSED_ARTICLE,
         original_url=text("original_url"), canonical_url=text("canonical_url"),
-        publisher=text("publisher"), retrieval_method=text("retrieval_method"),
+        publisher=publisher, retrieval_method=text("retrieval_method"),
         raw_content_hash=text("raw_content_hash"), observed_at=text("retrieved_at"),
         external_id=text("external_id", True), author_handle=text("author_handle", True),
         title=text("title", True), body=text("body", True), raw=text("raw", True),
         published_at=text("published_at", True), updated_at=text("updated_at", True),
         publication_evidence=text("publication_evidence", True),
+        publisher_host=text("normalized_publisher_host", True),
+        effective_source_role=effective_source_role,
+        independence_group=independence_group,
+        matched_rule_id=text("matched_rule_id", True),
+        authority_match=bool(authority_value),
+        classification_reason=text("classification_reason", True) or "unknown_publisher",
     )
 
 
@@ -104,7 +135,7 @@ def claims_from_observation(observation: ObservationContract, *, extracted_at: s
         evidence.append(EvidenceContract(evidence_id, claim_id, observation.observation_id,
                                          EvidenceRole.SUPPORTS, excerpt,
                                          hashlib.sha256(excerpt.encode()).hexdigest(),
-                                         observation.publisher.casefold(), observation.observed_at))
+                                         observation.independence_group, observation.observed_at))
         return ClaimRows(tuple(claims), tuple(evidence))
     for fact in facts:
         subject, predicate, value = _fact_fields(fact)
@@ -116,7 +147,7 @@ def claims_from_observation(observation: ObservationContract, *, extracted_at: s
         evidence.append(EvidenceContract(evidence_id, claim_id, observation.observation_id,
                                          EvidenceRole.SUPPORTS, fact.evidence,
                                          hashlib.sha256(fact.evidence.encode()).hexdigest(),
-                                         observation.publisher.casefold(), observation.observed_at))
+                                         observation.independence_group, observation.observed_at))
     return ClaimRows(tuple(claims), tuple(evidence))
 
 
