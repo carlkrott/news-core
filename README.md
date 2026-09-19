@@ -66,6 +66,23 @@ environment, mounted sockets, and the canary command.  See
 [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full topology, role
 separation, and trust boundaries.
 
+## Subject contracts
+
+The public configuration keeps discovery categories separate and maps them to
+one report subject only after deterministic routing.  `audiovisual` and
+`av_corporate` both feed the `professional_av` subject; they are not mixed
+with `audio_engineering` during discovery or investigation.  Audio Engineering
+covers recording, production, broadcast, touring, and live sound.  Professional
+AV covers corporate and installed AV, conferencing, control, displays, video,
+stage technology, audio systems for those spaces, and lighting.  A candidate
+with genuinely ambiguous subject evidence is held as
+`pending_subject_review` rather than copied into multiple briefings.
+
+The example contracts are version 2 and define per-subject report scope,
+subject inclusion/exclusion rules, recency windows, materiality rules, and
+story caps.  They are placeholders only; live source registries, operator
+bindings, state, and credentials are not part of this repository.
+
 ## Quick start (portable, no live delivery)
 
 ```bash

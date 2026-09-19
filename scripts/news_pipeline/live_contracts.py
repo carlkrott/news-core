@@ -13,6 +13,8 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Mapping
 
+from .models import Subject, SubjectDecision
+
 CATEGORY_VALUES = (
     "ai",
     "world",
@@ -23,6 +25,9 @@ CATEGORY_VALUES = (
     "av_corporate",
     "our_setup",
 )
+SUBJECT_VALUES = tuple(subject.value for subject in Subject)
+SUBJECT_DECISION_VALUES = tuple(decision.value for decision in SubjectDecision)
+REPORT_SCOPE_VALUES = ("per_subject",)
 OBSERVATION_KIND_VALUES = ("parsed_article", "query_failure", "query_comment", "fetch_marker")
 CLAIM_STATUS_VALUES = ("pending", "verified", "rejected", "superseded")
 EVIDENCE_ROLE_VALUES = ("supports", "contradicts")

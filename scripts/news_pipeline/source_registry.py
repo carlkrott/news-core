@@ -10,34 +10,81 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from .live_contracts import CATEGORY_VALUES, QuerySeed, SourceAdapter, SourceContract, SourceRole
+from .live_contracts import (
+    CATEGORY_VALUES,
+    REPORT_SCOPE_VALUES,
+    SUBJECT_VALUES,
+    QuerySeed,
+    SourceAdapter,
+    SourceContract,
+    SourceRole,
+)
+from .models import Subject, subject_for_category
 
 _SOURCE_TOP_KEYS = frozenset({"version", "sources"})
 _SOURCE_REQUIRED = frozenset({"source_id", "adapter_type", "source_role", "host", "category_scope", "enabled", "queries"})
 _SOURCE_OPTIONAL = frozenset({"title_blocklist", "content_blocklist", "url_blocklist", "allowlist_domains", "cadence_minutes", "terms_notes", "rate_limit_notes", "next_due_at"})
 _QUERY_KEYS = frozenset({"text", "categories"})
 _TOPIC_TOP_KEYS = frozenset({"version", "topics"})
-_TOPIC_KEYS = frozenset({"category", "label", "included_in_combined_report", "consequential_only"})
-_POLICY_TOP_KEYS = frozenset({"version", "pipeline", "report", "deferred"})
+_TOPIC_KEYS = frozenset({"category", "subject", "label", "included_in_subject_report", "consequential_only"})
+_POLICY_TOP_KEYS = frozenset({"version", "pipeline", "report", "subjects", "deferred"})
 _PIPELINE_KEYS = frozenset({"database", "journal_mode", "serialized_writer", "dry_run", "breaking_alerts", "reddit_direct_ingestion", "evidence_rule", "raw_body_retention_days", "normalized_retention"})
-_REPORT_KEYS = frozenset({"scope", "categories", "time", "timezone", "channel", "verified_events_only", "watchlist_max_items", "formats", "depth"})
+_REPORT_KEYS = frozenset({"scope", "categories", "subjects", "time", "timezone", "channel", "verified_events_only", "watchlist_max_items", "formats", "depth"})
+_SUBJECT_POLICY_KEYS = frozenset({"label", "included_in_report", "inclusion_rules", "exclusion_rules", "materiality_rule", "recency_days", "max_story_count"})
 _DEFERRED_KEYS = frozenset({"decisions"})
 
 
 @dataclass(frozen=True, slots=True)
 class TopicPolicy:
     category: str
+    subject: Subject
     label: str
-    included_in_combined_report: bool
+    included_in_subject_report: bool
     consequential_only: bool
 
     def __post_init__(self) -> None:
         if self.category not in CATEGORY_VALUES:
             raise ValueError(f"unknown topic category: {self.category!r}")
+        if not isinstance(self.subject, Subject):
+            raise ValueError("topic subject must be a known Subject")
+        if subject_for_category(self.category) is not self.subject:
+            raise ValueError(f"topic subject does not match category: {self.category!r}")
         if type(self.label) is not str or not self.label.strip():
             raise ValueError("topic label must be a non-empty string")
-        if type(self.included_in_combined_report) is not bool or type(self.consequential_only) is not bool:
+        if type(self.included_in_subject_report) is not bool or type(self.consequential_only) is not bool:
             raise ValueError("topic flags must be booleans")
+
+
+@dataclass(frozen=True, slots=True)
+class SubjectPolicy:
+    subject: Subject
+    label: str
+    included_in_report: bool
+    inclusion_rules: tuple[str, ...]
+    exclusion_rules: tuple[str, ...]
+    materiality_rule: str
+    recency_days: int
+    max_story_count: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.subject, Subject):
+            raise ValueError("subject policy must name a known Subject")
+        if type(self.label) is not str or not self.label.strip():
+            raise ValueError("subject policy label must be a non-empty string")
+        if type(self.included_in_report) is not bool:
+            raise ValueError("subject policy included_in_report must be a boolean")
+        for name in ("inclusion_rules", "exclusion_rules"):
+            value = getattr(self, name)
+            if type(value) is not tuple or not value or any(type(item) is not str or not item.strip() for item in value):
+                raise ValueError(f"{name} must be a non-empty tuple of strings")
+            if len(value) != len(set(value)):
+                raise ValueError(f"{name} must not contain duplicates")
+        if type(self.materiality_rule) is not str or not self.materiality_rule.strip():
+            raise ValueError("materiality_rule must be a non-empty string")
+        if type(self.recency_days) is not int or type(self.recency_days) is bool or self.recency_days < 1:
+            raise ValueError("recency_days must be an integer >= 1")
+        if type(self.max_story_count) is not int or type(self.max_story_count) is bool or self.max_story_count < 1:
+            raise ValueError("max_story_count must be an integer >= 1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +120,7 @@ class PipelinePolicy:
 class ReportPolicy:
     scope: str
     categories: tuple[str, ...]
+    subjects: tuple[Subject, ...]
     time: str
     timezone: str
     channel: str
@@ -82,12 +130,16 @@ class ReportPolicy:
     depth: str
 
     def __post_init__(self) -> None:
-        if self.scope != "combined" or self.time != "08:00" or self.timezone != "Europe/London" or self.channel != "telegram":
-            raise ValueError("report delivery must be one combined 08:00 Europe/London Telegram briefing")
+        if self.scope not in REPORT_SCOPE_VALUES or self.time != "08:00" or self.timezone != "Europe/London" or self.channel != "telegram":
+            raise ValueError("report delivery must be per-subject at 08:00 Europe/London on Telegram")
         if type(self.categories) is not tuple or len(self.categories) != len(set(self.categories)):
             raise ValueError("report categories must be a unique tuple")
         if set(self.categories) != set(CATEGORY_VALUES):
-            raise ValueError("combined report must include all eight categories")
+            raise ValueError("per-subject reports must retain all eight ingest categories")
+        if type(self.subjects) is not tuple or any(not isinstance(subject, Subject) for subject in self.subjects):
+            raise ValueError("report subjects must be a tuple of Subject values")
+        if len(self.subjects) != len(set(self.subjects)) or {subject.value for subject in self.subjects} != set(SUBJECT_VALUES):
+            raise ValueError("per-subject reports must define every subject exactly once")
         if self.verified_events_only is not True:
             raise ValueError("main report must contain verified events only")
         if type(self.watchlist_max_items) is not int or type(self.watchlist_max_items) is bool or self.watchlist_max_items != 3:
@@ -105,11 +157,12 @@ class NewsConfig:
     topics: tuple[TopicPolicy, ...]
     pipeline: PipelinePolicy
     report: ReportPolicy
+    subject_policies: tuple[SubjectPolicy, ...]
     deferred_decisions: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if self.version != 1:
-            raise ValueError("configuration contract version must be 1")
+        if self.version != 2:
+            raise ValueError("configuration contract version 2 required; migrate version 1 configuration")
         source_ids = tuple(source.source_id for source in self.sources)
         if source_ids != tuple(sorted(source_ids)) or len(source_ids) != len(set(source_ids)):
             raise ValueError("sources must be uniquely ordered by source_id")
@@ -118,11 +171,19 @@ class NewsConfig:
             raise ValueError("topics must be uniquely ordered by category")
         if set(topic_categories) != set(CATEGORY_VALUES):
             raise ValueError("topics must define all eight categories")
+        topic_subjects = tuple(topic.subject.value for topic in self.topics)
+        if set(topic_subjects) != set(SUBJECT_VALUES):
+            raise ValueError("topics must map all subjects")
+        subject_ids = tuple(policy.subject.value for policy in self.subject_policies)
+        if subject_ids != tuple(sorted(subject_ids)) or len(subject_ids) != len(set(subject_ids)) or set(subject_ids) != set(SUBJECT_VALUES):
+            raise ValueError("subject policies must be uniquely ordered and complete")
         source_categories = {category for source in self.sources for category in source.category_scope}
         if source_categories != set(topic_categories):
             raise ValueError("source and topic category references are inconsistent")
         if set(self.report.categories) != set(topic_categories):
             raise ValueError("report and topic category references are inconsistent")
+        if {subject.value for subject in self.report.subjects} != set(subject_ids):
+            raise ValueError("report and subject policy references are inconsistent")
         if type(self.deferred_decisions) is not tuple or not self.deferred_decisions:
             raise ValueError("deferred_decisions must be a non-empty tuple")
 
@@ -133,6 +194,10 @@ class NewsConfig:
     @property
     def topics_by_category(self) -> Mapping[str, TopicPolicy]:
         return MappingProxyType({topic.category: topic for topic in self.topics})
+
+    @property
+    def subjects_by_id(self) -> Mapping[Subject, SubjectPolicy]:
+        return MappingProxyType({policy.subject: policy for policy in self.subject_policies})
 
 
 def _load_toml(path: str | Path) -> dict[str, Any]:
@@ -154,8 +219,8 @@ def _exact_keys(name: str, value: Mapping[str, Any], *, required: frozenset[str]
 
 def _version(name: str, raw: Mapping[str, Any]) -> int:
     value = raw.get("version")
-    if type(value) is not int or type(value) is bool or value != 1:
-        raise ValueError(f"{name} version must be integer 1")
+    if type(value) is not int or type(value) is bool or value != 2:
+        raise ValueError(f"{name} version 2 required; migrate version 1 configuration")
     return value
 
 
@@ -168,6 +233,15 @@ def _string_tuple(name: str, value: object, *, nonempty: bool = False) -> tuple[
     if len(result) != len(set(result)):
         raise ValueError(f"{name} must not contain duplicates")
     return result
+
+
+def _subject_tuple(name: str, value: object) -> tuple[Subject, ...]:
+    values = _string_tuple(name, value, nonempty=True)
+    try:
+        subjects = tuple(Subject(item) for item in values)
+    except ValueError as exc:
+        raise ValueError(f"{name} contains an unknown subject") from exc
+    return subjects
 
 
 def _parse_sources(raw: Mapping[str, Any]) -> tuple[SourceContract, ...]:
@@ -225,17 +299,53 @@ def _parse_topics(raw: Mapping[str, Any]) -> tuple[TopicPolicy, ...]:
         if type(entry) is not dict:
             raise ValueError(f"topics[{index}] must be a table")
         _exact_keys(f"topics[{index}]", entry, required=_TOPIC_KEYS)
-        topics.append(TopicPolicy(**entry))
+        try:
+            subject = Subject(entry["subject"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"topics[{index}] has an invalid subject") from exc
+        topics.append(TopicPolicy(
+            category=entry["category"],
+            subject=subject,
+            label=entry["label"],
+            included_in_subject_report=entry["included_in_subject_report"],
+            consequential_only=entry["consequential_only"],
+        ))
     if len({topic.category for topic in topics}) != len(topics):
         raise ValueError("duplicate topic category")
     return tuple(sorted(topics, key=lambda topic: topic.category))
 
 
-def _parse_policy(raw: Mapping[str, Any]) -> tuple[PipelinePolicy, ReportPolicy, tuple[str, ...]]:
+def _parse_subjects(raw: Mapping[str, Any]) -> tuple[SubjectPolicy, ...]:
+    if type(raw) is not dict or set(raw) != set(SUBJECT_VALUES):
+        raise ValueError("subjects must define exactly every report subject")
+    policies: list[SubjectPolicy] = []
+    for subject_value, entry in raw.items():
+        if type(entry) is not dict:
+            raise ValueError(f"subjects.{subject_value} must be a table")
+        _exact_keys(f"subjects.{subject_value}", entry, required=_SUBJECT_POLICY_KEYS)
+        try:
+            subject = Subject(subject_value)
+        except ValueError as exc:
+            raise ValueError(f"subjects.{subject_value} is not a known subject") from exc
+        policies.append(SubjectPolicy(
+            subject=subject,
+            label=entry["label"],
+            included_in_report=entry["included_in_report"],
+            inclusion_rules=_string_tuple(f"subjects.{subject_value}.inclusion_rules", entry["inclusion_rules"], nonempty=True),
+            exclusion_rules=_string_tuple(f"subjects.{subject_value}.exclusion_rules", entry["exclusion_rules"], nonempty=True),
+            materiality_rule=entry["materiality_rule"],
+            recency_days=entry["recency_days"],
+            max_story_count=entry["max_story_count"],
+        ))
+    return tuple(sorted(policies, key=lambda policy: policy.subject.value))
+
+
+def _parse_policy(raw: Mapping[str, Any]) -> tuple[PipelinePolicy, ReportPolicy, tuple[SubjectPolicy, ...], tuple[str, ...]]:
     _exact_keys("news-policy", raw, required=_POLICY_TOP_KEYS)
     _version("news-policy", raw)
     pipeline_raw = raw["pipeline"]
     report_raw = raw["report"]
+    subjects_raw = raw["subjects"]
     deferred_raw = raw["deferred"]
     for name, value in (("pipeline", pipeline_raw), ("report", report_raw), ("deferred", deferred_raw)):
         if type(value) is not dict:
@@ -244,9 +354,11 @@ def _parse_policy(raw: Mapping[str, Any]) -> tuple[PipelinePolicy, ReportPolicy,
     _exact_keys("report", report_raw, required=_REPORT_KEYS)
     _exact_keys("deferred", deferred_raw, required=_DEFERRED_KEYS)
     pipeline = PipelinePolicy(**pipeline_raw)
+    subject_policies = _parse_subjects(subjects_raw)
     report = ReportPolicy(
         scope=report_raw["scope"],
         categories=_string_tuple("report categories", report_raw["categories"], nonempty=True),
+        subjects=_subject_tuple("report subjects", report_raw["subjects"]),
         time=report_raw["time"],
         timezone=report_raw["timezone"],
         channel=report_raw["channel"],
@@ -256,7 +368,7 @@ def _parse_policy(raw: Mapping[str, Any]) -> tuple[PipelinePolicy, ReportPolicy,
         depth=report_raw["depth"],
     )
     deferred = _string_tuple("deferred decisions", deferred_raw["decisions"], nonempty=True)
-    return pipeline, report, deferred
+    return pipeline, report, subject_policies, deferred
 
 
 def load_registry(sources_path: str | Path, topics_path: str | Path, policy_path: str | Path) -> NewsConfig:
@@ -265,9 +377,9 @@ def load_registry(sources_path: str | Path, topics_path: str | Path, policy_path
     topics_raw = _load_toml(topics_path)
     policy_raw = _load_toml(policy_path)
     versions = {_version("news-sources", sources_raw), _version("news-topics", topics_raw), _version("news-policy", policy_raw)}
-    if versions != {1}:
+    if versions != {2}:
         raise ValueError("all configuration files must use the same contract version")
     sources = _parse_sources(sources_raw)
     topics = _parse_topics(topics_raw)
-    pipeline, report, deferred = _parse_policy(policy_raw)
-    return NewsConfig(version=1, sources=sources, topics=topics, pipeline=pipeline, report=report, deferred_decisions=deferred)
+    pipeline, report, subject_policies, deferred = _parse_policy(policy_raw)
+    return NewsConfig(version=2, sources=sources, topics=topics, pipeline=pipeline, report=report, subject_policies=subject_policies, deferred_decisions=deferred)

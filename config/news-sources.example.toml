@@ -10,7 +10,7 @@
 #
 # Adapter types and roles are public; query text and category scopes are
 # illustrative and should be reviewed before publication.
-version = 1
+version = 2
 
 [[sources]]
 source_id = "example-discovery-ai"

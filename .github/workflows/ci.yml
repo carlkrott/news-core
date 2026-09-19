@@ -115,6 +115,11 @@ jobs:
           python3 -m unittest discover -s tests/news_pipeline \
             -p test_container_contract.py -v
 
+      - name: focused subject contract tests
+        run: |
+          python3 -m unittest discover -s tests/news_pipeline \
+            -p test_subject_contracts.py -v
+
   image-smoke:
     name: build and inspect disposable image
     runs-on: ubuntu-latest
