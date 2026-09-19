@@ -151,3 +151,23 @@ and is **not** part of this export surface.
    `dependencies = []`.
 5. No `LICENSE` / SPDX / claim of license is present until the operator
    explicitly selects publication rights.
+
+## 10. Subject isolation
+
+Ingest categories remain separate so source results and investigation context
+cannot contaminate one another.  The typed subject layer maps them as follows:
+
+| Subject | Input categories | Editorial boundary |
+|---|---|---|
+| `world` | `world` | Consequential public events |
+| `ai` | `ai` | Models, services, policy, safety, research, and infrastructure |
+| `audio_engineering` | `audio_engineering` | Recording, production, broadcast, touring, and live sound |
+| `professional_av` | `audiovisual`, `av_corporate` | Corporate/installed AV, control, display, video, stage, audio, and lighting |
+| `hardware` | `hardware` | Computer hardware and systems |
+| `fantasy_novel` | `fantasy_novel` | Fantasy publishing and industry |
+| `our_setup` | `our_setup` | Generic self-hosted and media-stack relevance |
+
+Reports use `per_subject` scope.  The two Professional AV input categories
+may combine only after event-level QC; Audio Engineering remains separate.
+If category evidence maps to more than one subject, the assignment is
+`pending_subject_review` and is not reportable until resolved.

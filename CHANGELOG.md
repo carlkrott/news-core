@@ -6,6 +6,11 @@ All notable changes to the public news-core source are recorded here.
 
 - Publication preparation for the delivery-disabled, containerized news core.
 - Added the closed public-export workflow and safety-review metadata.
+- Added version-2 subject contracts with deterministic category-to-subject
+  routing, per-subject report scope, recency windows, and fail-closed ambiguous
+  routing.
+- Added sanitized inclusion, exclusion, materiality, and story-cap examples for
+  Audio Engineering and Professional AV subject boundaries.
 
 ## [0.1.0] - 2026-09-15
 

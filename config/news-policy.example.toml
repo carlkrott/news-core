@@ -1,7 +1,7 @@
 # Public-export example policy.  This is a sanitized, placeholder copy
 # of the operator's live policy.  Replace ``example.com`` placeholders
 # with your own values; do not commit or publish real values.
-version = 1
+version = 2
 
 [pipeline]
 database = "sqlite"
@@ -18,9 +18,11 @@ raw_body_retention_days = 30
 normalized_retention = "indefinite"
 
 [report]
-scope = "combined"
-# Category list is illustrative; the operator may add or remove entries.
+scope = "per_subject"
+# Categories remain separate discovery lanes; reports are combined only
+# within one subject after deterministic QC.
 categories = ["ai", "world", "audio_engineering", "hardware", "fantasy_novel", "audiovisual", "av_corporate", "our_setup"]
+subjects = ["ai", "audio_engineering", "fantasy_novel", "hardware", "our_setup", "professional_av", "world"]
 time = "08:00"
 timezone = "Europe/London"
 channel = "telegram"
@@ -29,9 +31,72 @@ watchlist_max_items = 3
 formats = ["json", "jsonl", "markdown", "manifest"]
 depth = "short_human_plus_comprehensive_archive"
 
+[subjects.ai]
+label = "AI & Stack"
+included_in_report = true
+recency_days = 14
+inclusion_rules = ["material_model_or_service_change", "policy_safety_infrastructure_or_research_change"]
+exclusion_rules = ["generic_tutorial_or_prompt_list", "marketing_roundup_without_factual_delta"]
+materiality_rule = "Require a grounded change to model, service, policy, safety, infrastructure, research, or business state."
+max_story_count = 8
+
+[subjects.audio_engineering]
+label = "Audio Engineering"
+included_in_report = true
+recency_days = 14
+inclusion_rules = ["recording_production_broadcast_or_live_sound_use_case", "material_equipment_or_workflow_change"]
+exclusion_rules = ["meeting_room_or_uc_solution", "generic_consumer_audio"]
+materiality_rule = "Require a grounded change to recording, production, broadcast, touring, or live-sound equipment or workflow."
+max_story_count = 8
+
+[subjects.fantasy_novel]
+label = "Fantasy Novel Industry"
+included_in_report = true
+recency_days = 14
+inclusion_rules = ["publishing_author_rights_award_adaptation_or_release_change"]
+exclusion_rules = ["evergreen_list_or_repeated_background", "unsupported_rumor_roundup"]
+materiality_rule = "Require a grounded change to a publishing, authorship, rights, adaptation, award, or release state."
+max_story_count = 8
+
+[subjects.hardware]
+label = "Computer Hardware"
+included_in_report = true
+recency_days = 14
+inclusion_rules = ["material_processor_gpu_storage_networking_or_platform_change", "firmware_or_supply_chain_change"]
+exclusion_rules = ["unsupported_rumor_roundup", "minor_marketing_refresh"]
+materiality_rule = "Require a grounded change to a hardware, platform, firmware, or supply-chain state."
+max_story_count = 8
+
+[subjects.our_setup]
+label = "Our Setup"
+included_in_report = true
+recency_days = 14
+inclusion_rules = ["relevant_self_hosted_or_media_stack_change"]
+exclusion_rules = ["unrelated_consumer_news", "private_binding_or_credential_detail"]
+materiality_rule = "Require a grounded change relevant to a generic self-hosted, agent, or media-stack capability without exposing private bindings."
+max_story_count = 8
+
+[subjects.professional_av]
+label = "Professional AV"
+included_in_report = true
+recency_days = 14
+inclusion_rules = ["corporate_installed_or_conferencing_av", "control_display_video_stage_or_lighting_technology"]
+exclusion_rules = ["consumer_or_studio_desktop_interface", "pure_recording_product_without_installed_or_stage_use_case"]
+materiality_rule = "Require a grounded change to corporate, installed, venue, stage, control, display, video, audio, or lighting technology."
+max_story_count = 8
+
+[subjects.world]
+label = "World"
+included_in_report = true
+recency_days = 14
+inclusion_rules = ["consequential_geopolitical_economic_regulatory_or_public_safety_event", "major_scientific_event"]
+exclusion_rules = ["celebrity_or_sports_item", "listicle_or_generic_opinion_recap"]
+materiality_rule = "Require a grounded consequential change with public, regulatory, economic, safety, geopolitical, or major scientific relevance."
+max_story_count = 8
+
 [deferred]
 decisions = [
-    "priority/order and merge/remove/add decisions for the eight categories",
+    "priority/order and merge/remove/add decisions for the seven report subjects",
     "specific Bluesky/Mastodon/Lemmy/YouTube/GitHub/publisher/vendor seeds",
     "trusted, distrusted, or deliberately balanced outlets",
     "manual-review behavior for contested/high-impact items",
