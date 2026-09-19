@@ -192,6 +192,20 @@ class ArgvBuilderTests(unittest.TestCase):
         self.assertIn("--run-started-at", argv)
         self.assertIn("2026-09-14T06:30:00Z", argv)
 
+    def test_ingest_argv_forwards_optional_provenance_path(self):
+        argv = _ingest_argv(_ctx(
+            db_path=Path("/canary/state.db"),
+            artifact_root=Path("/canary/artifacts"),
+            payload={
+                "sources": "/canary/sources.toml",
+                "topics": "/canary/topics.toml",
+                "policy": "/canary/policy.toml",
+                "provenance": "/canary/provenance.toml",
+            },
+        ))
+        index = argv.index("--provenance")
+        self.assertEqual(argv[index + 1], "/canary/provenance.toml")
+
     def test_process_argv_uses_process_subcommand(self):
         ctx = _ctx(
             db_path=Path("/canary/state.db"),

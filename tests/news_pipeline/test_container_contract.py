@@ -188,6 +188,7 @@ class DockerfileContractTests(unittest.TestCase):
             config_sources,
             [
                 "config/news-policy.example.toml",
+                "config/news-provenance.example.toml",
                 "config/news-sources.example.toml",
                 "config/news-topics.example.toml",
                 "config/runtime-schedule.example.toml",

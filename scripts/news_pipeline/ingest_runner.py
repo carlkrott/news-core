@@ -30,8 +30,10 @@ from .adapters.base import (
 from .adapters.rss import RssAdapter
 from .adapters.searxng import SearxngAdapter
 from .live_contracts import QuerySeed, QueryStatus, SourceAdapter, SourceContract, source_to_row, stable_id
+from .provenance import PublisherRegistry, load_provenance
 from .schema_v3 import V3_COLUMNS, V3_TABLES
 from .schema_v4 import V4_COLUMNS, V4_TABLES
+from .schema_v7 import V7_COLUMNS, V7_TABLES, backfill_source_item_provenance
 from .source_registry import load_registry
 
 _GLOBAL_CONCURRENCY = 4
@@ -168,6 +170,7 @@ async def run_ingest(
     run_started_at: str,
     *,
     source_ids: Sequence[str] | None = None,
+    provenance_path: str | Path | None = None,
     max_queries: int | None = None,
     transport_factory: TransportFactory | None = None,
     async_sleep: AsyncSleep = asyncio.sleep,
@@ -190,6 +193,11 @@ async def run_ingest(
 
     _verify_schema(path)
     config = load_registry(sources_path, topics_path, policy_path)
+    provenance_registry = (
+        PublisherRegistry(load_provenance(provenance_path).rules)
+        if provenance_path is not None
+        else PublisherRegistry(())
+    )
     by_id = {source.source_id: source for source in config.sources}
     if requested is not None:
         unknown = sorted(set(requested) - set(by_id))
@@ -244,7 +252,7 @@ async def run_ingest(
                     retries=0,
                 )
             outcomes.append(value)
-            query_results.append(_persist_outcome(connection, value))
+            query_results.append(_persist_outcome(connection, value, provenance_registry))
 
         source_results = _finalize_sources(connection, claims, query_results, outcomes)
         return IngestReport(
@@ -276,10 +284,15 @@ def _verify_schema(db_path: Path) -> None:
         connection = sqlite3.connect(uri, uri=True, timeout=5.0)
         try:
             markers = {int(row[0]) for row in connection.execute("SELECT version FROM schema_migrations")}
-            accepted_markers = ({1, 2, 3, 4}, {1, 2, 3, 4, 5}, {1, 2, 3, 4, 5, 6})
+            accepted_markers = (
+                {1, 2, 3, 4},
+                {1, 2, 3, 4, 5},
+                {1, 2, 3, 4, 5, 6},
+                {1, 2, 3, 4, 5, 6, 7},
+            )
             if markers not in accepted_markers:
                 raise ValueError(
-                    "database schema markers must be a known additive v4-v6 prefix, "
+                    "database schema markers must be a known additive v4-v7 prefix, "
                     f"got {sorted(markers)}"
                 )
             tables = {
@@ -289,10 +302,14 @@ def _verify_schema(db_path: Path) -> None:
                 )
             }
             required = set(V3_TABLES) | set(V4_TABLES)
+            expected_columns = {**V3_COLUMNS, **V4_COLUMNS}
+            if markers == {1, 2, 3, 4, 5, 6, 7}:
+                required |= set(V7_TABLES)
+                expected_columns.update(V7_COLUMNS)
             missing = sorted(required - tables)
             if missing:
                 raise ValueError(f"database is missing required tables: {missing}")
-            for table, expected in {**V3_COLUMNS, **V4_COLUMNS}.items():
+            for table, expected in expected_columns.items():
                 actual = tuple(row[1] for row in connection.execute(f'PRAGMA table_info("{table}")'))
                 if actual != expected:
                     raise ValueError(f"table {table} has incompatible columns: {actual}")
@@ -300,6 +317,12 @@ def _verify_schema(db_path: Path) -> None:
             connection.close()
     except sqlite3.DatabaseError as exc:
         raise ValueError(f"database is not a compatible schema-v4 SQLite database: {exc}") from exc
+
+
+def _has_schema_v7(connection: sqlite3.Connection) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE version=7"
+    ).fetchone() is not None
 
 
 def _open_writer(path: Path) -> sqlite3.Connection:
@@ -528,7 +551,11 @@ async def _fetch_job(
     return _NetworkOutcome(job, result, _validated_now(now), retries)
 
 
-def _persist_outcome(connection: sqlite3.Connection, outcome: _NetworkOutcome) -> QueryResult:
+def _persist_outcome(
+    connection: sqlite3.Connection,
+    outcome: _NetworkOutcome,
+    provenance_registry: PublisherRegistry | None = None,
+) -> QueryResult:
     job = outcome.job
     result = outcome.result
     filtered, kept = _filter_items(
@@ -585,6 +612,13 @@ def _persist_outcome(connection: sqlite3.Connection, outcome: _NetworkOutcome) -
                 inserted += 1
             else:
                 duplicate += 1
+        if provenance_registry is not None and _has_schema_v7(connection):
+            backfill_source_item_provenance(
+                connection,
+                provenance_registry,
+                outcome.finished_at,
+                source_item_ids=tuple(item.source_item_id for item in valid_items),
+            )
 
         status, error = _query_status(result, bool(rejections or filtered))
         error_count = len(rejections) + (1 if result.error is not None else 0)

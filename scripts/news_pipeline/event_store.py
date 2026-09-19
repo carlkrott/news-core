@@ -100,6 +100,40 @@ def _require_v5(connection: sqlite3.Connection) -> None:
     _validate_v5(connection)
 
 
+def _has_schema_v7(connection: sqlite3.Connection) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE version=7"
+    ).fetchone() is not None
+
+
+def _v7_evidence_row(row: tuple, claim_subject: str) -> dict[str, object]:
+    evidence_role, effective_role, group, authority_match, authority_entities = row
+    if effective_role is None:
+        return {
+            "role": evidence_role,
+            "effective_source_role": "",
+            "independence_group": "",
+            "authority_match": None,
+        }
+    authority = authority_match in (1, True)
+    if not authority and effective_role == "primary" and isinstance(authority_entities, str):
+        try:
+            entities = json.loads(authority_entities)
+        except json.JSONDecodeError:
+            entities = ()
+        if isinstance(entities, list):
+            authority = any(
+                isinstance(entity, str) and entity.casefold() == claim_subject.casefold()
+                for entity in entities
+            )
+    return {
+        "role": evidence_role,
+        "effective_source_role": effective_role,
+        "independence_group": group,
+        "authority_match": authority,
+    }
+
+
 def _is_retraction_text(source: Mapping[str, object]) -> bool:
     text = " ".join(str(source.get(name) or "") for name in ("title", "body"))
     hits = _family_hits(text)
@@ -195,6 +229,7 @@ def process_phase4(db_path: str | Path, evaluated_at: str, *, max_items: int = 1
     connection.execute("PRAGMA busy_timeout=10000")
     try:
         _require_v5(connection)
+        has_v7 = _has_schema_v7(connection)
         connection.execute("BEGIN IMMEDIATE")
         selected = _source_decisions(connection, max_items)
         if max_items == 0: selected = []
@@ -208,7 +243,20 @@ def process_phase4(db_path: str | Path, evaluated_at: str, *, max_items: int = 1
         plans_remaining = max_corroboration_plans
         for decision_id, kind, reason, decided_at, source_item_id, _kind_of_run, _provenance in selected:
             columns = tuple(r[1] for r in connection.execute("PRAGMA table_info(source_items)"))
-            source = dict(zip(columns, connection.execute("SELECT * FROM source_items WHERE source_item_id=?", (source_item_id,)).fetchone()))
+            if has_v7:
+                columns += (
+                    "normalized_publisher_host", "effective_source_role", "independence_group",
+                    "matched_rule_id", "authority_match", "classification_reason",
+                )
+                source_row = connection.execute("""SELECT si.*,
+                    sp.normalized_publisher_host,sp.effective_source_role,sp.independence_group,
+                    sp.matched_rule_id,sp.authority_match,sp.classification_reason
+                    FROM source_items si
+                    LEFT JOIN source_item_provenance sp ON sp.source_item_id=si.source_item_id
+                    WHERE si.source_item_id=?""", (source_item_id,)).fetchone()
+            else:
+                source_row = connection.execute("SELECT * FROM source_items WHERE source_item_id=?", (source_item_id,)).fetchone()
+            source = dict(zip(columns, source_row))
             observation = observation_from_source_item(source)
             rows = claims_from_observation(observation, extracted_at=evaluated_at)
             inserted_claims, inserted_evidence = persist_claim_rows_counts(connection, rows)
@@ -221,10 +269,19 @@ def process_phase4(db_path: str | Path, evaluated_at: str, *, max_items: int = 1
                 equivalent = connection.execute("SELECT claim_id FROM claims WHERE subject=? AND predicate=? AND object_value=? ORDER BY claim_id", claim_key).fetchall()
                 ids = tuple(row[0] for row in equivalent)
                 equivalent_ids.update(ids)
-                evidence_rows = connection.execute("""SELECT ce.evidence_role,ce.independence_group,si.source_role
-                    FROM claim_evidence ce JOIN source_items si ON si.source_item_id=ce.source_item_id
-                    WHERE ce.claim_id IN (%s) ORDER BY ce.evidence_id""" % ",".join("?" for _ in ids), ids).fetchall()
-                state = verify_evidence(tuple({"role": r[0], "independence_group": r[1], "source_role": r[2]} for r in evidence_rows))
+                if has_v7:
+                    evidence_rows = connection.execute("""SELECT ce.evidence_role,sp.effective_source_role,
+                        sp.independence_group,sp.authority_match,pr.authority_entities_json
+                        FROM claim_evidence ce
+                        LEFT JOIN source_item_provenance sp ON sp.source_item_id=ce.source_item_id
+                        LEFT JOIN publisher_registry pr ON pr.rule_id=sp.matched_rule_id
+                        WHERE ce.claim_id IN (%s) ORDER BY ce.evidence_id""" % ",".join("?" for _ in ids), ids).fetchall()
+                    state = verify_evidence(tuple(_v7_evidence_row(row, str(claim_key[0])) for row in evidence_rows))
+                else:
+                    evidence_rows = connection.execute("""SELECT ce.evidence_role,ce.independence_group,si.source_role
+                        FROM claim_evidence ce JOIN source_items si ON si.source_item_id=ce.source_item_id
+                        WHERE ce.claim_id IN (%s) ORDER BY ce.evidence_id""" % ",".join("?" for _ in ids), ids).fetchall()
+                    state = verify_evidence(tuple({"role": r[0], "independence_group": r[1], "source_role": r[2]} for r in evidence_rows))
                 if state is VerificationState.VERIFIED:
                     counts[2] += connection.execute("UPDATE claims SET status='verified' WHERE subject=? AND predicate=? AND object_value=? AND status='pending'", claim_key).rowcount
             event_claim = connection.execute("SELECT subject,predicate,object_value FROM claims WHERE claim_id=?", (claim_ids[0],)).fetchone()

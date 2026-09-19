@@ -329,6 +329,12 @@ class ObservationContract:
     scheduled_for: str | None = None
     publication_evidence: str | None = None
     unknown_date_reason: str | None = None
+    publisher_host: str | None = None
+    effective_source_role: SourceRole = SourceRole.DISCOVERY
+    independence_group: str = "unknown"
+    matched_rule_id: str | None = None
+    authority_match: bool = False
+    classification_reason: str = "unknown_publisher"
 
     def __post_init__(self) -> None:
         for name in ("observation_id", "source_id", "original_url", "canonical_url", "publisher", "retrieval_method"):
@@ -337,8 +343,13 @@ class ObservationContract:
         _enum("kind", self.kind, ObservationKind)
         _hash("raw_content_hash", self.raw_content_hash)
         _timestamp("observed_at", self.observed_at)
-        for name in ("external_id", "author_handle", "title", "body", "raw", "publication_evidence", "unknown_date_reason"):
+        for name in ("external_id", "author_handle", "title", "body", "raw", "publication_evidence", "unknown_date_reason", "publisher_host", "matched_rule_id"):
             _text(name, getattr(self, name), optional=True)
+        _enum("effective_source_role", self.effective_source_role, SourceRole)
+        _text("independence_group", self.independence_group)
+        if type(self.authority_match) is not bool:
+            raise ValueError("authority_match must be a boolean")
+        _text("classification_reason", self.classification_reason)
         for name in ("published_at", "updated_at", "announced_at", "occurred_at", "scheduled_for"):
             _timestamp(name, getattr(self, name), optional=True)
         if self.published_at is None and self.publication_evidence is not None:
@@ -576,14 +587,28 @@ def source_from_row(row: Mapping[str, Any]) -> SourceContract:
 
 
 def observation_to_row(value: ObservationContract) -> dict[str, Any]:
-    return {field: getattr(value, field) for field in value.__dataclass_fields__} | {"kind": value.kind.value}
+    row = {field: getattr(value, field) for field in value.__dataclass_fields__}
+    row["kind"] = value.kind.value
+    row["effective_source_role"] = value.effective_source_role.value
+    return row
 
 
 def observation_from_row(row: Mapping[str, Any]) -> ObservationContract:
     keys = tuple(ObservationContract.__dataclass_fields__)
-    _required(row, keys)
-    values = {key: row[key] for key in keys}
+    defaults: dict[str, Any] = {
+        "publisher_host": None,
+        "effective_source_role": SourceRole.DISCOVERY.value,
+        "independence_group": "unknown",
+        "matched_rule_id": None,
+        "authority_match": False,
+        "classification_reason": "unknown_publisher",
+    }
+    values = {key: row[key] if key in row else defaults[key] for key in keys}
+    missing = [key for key in keys if key not in row and key not in defaults]
+    if missing:
+        raise ValueError(f"observation row is missing required fields: {missing}")
     values["kind"] = ObservationKind(values["kind"])
+    values["effective_source_role"] = SourceRole(values["effective_source_role"])
     return ObservationContract(**values)
 
 

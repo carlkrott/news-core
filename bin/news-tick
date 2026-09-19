@@ -7,6 +7,7 @@ ARGS=(--db "$DB")
 [[ -n "${NEWS_PIPELINE_SOURCES:-}" ]] && ARGS+=(--sources "$NEWS_PIPELINE_SOURCES")
 [[ -n "${NEWS_PIPELINE_TOPICS:-}" ]] && ARGS+=(--topics "$NEWS_PIPELINE_TOPICS")
 [[ -n "${NEWS_PIPELINE_POLICY:-}" ]] && ARGS+=(--policy "$NEWS_PIPELINE_POLICY")
+[[ -n "${NEWS_PIPELINE_PROVENANCE:-}" ]] && ARGS+=(--provenance "$NEWS_PIPELINE_PROVENANCE")
 [[ -n "${NEWS_PIPELINE_RUN_STARTED_AT:-}" ]] && ARGS+=(--run-started-at "$NEWS_PIPELINE_RUN_STARTED_AT")
 [[ -n "${NEWS_PIPELINE_MAX_QUERIES:-}" ]] && ARGS+=(--max-queries "$NEWS_PIPELINE_MAX_QUERIES")
 if [[ "${NEWS_PHASE6_ENABLE_NETWORK:-0}" == "1" ]]; then

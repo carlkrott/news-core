@@ -11,6 +11,11 @@ All notable changes to the public news-core source are recorded here.
   routing.
 - Added sanitized inclusion, exclusion, materiality, and story-cap examples for
   Audio Engineering and Professional AV subject boundaries.
+- Added additive publisher provenance and verification identity contracts:
+  reviewed publisher families, conservative unknown backfill, explicit authority
+  matching, and fail-closed independence groups.  Live publisher rules remain
+  private overlays; this structural change performs no live migration or
+  delivery cutover.
 
 ## [0.1.0] - 2026-09-15
 

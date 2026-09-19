@@ -69,6 +69,7 @@ PUBLIC_ALLOWLIST: frozenset[str] = frozenset(
         ".github/workflows/security.yml",
         ".github/workflows/release.yml",
         "config/news-policy.example.toml",
+        "config/news-provenance.example.toml",
         "config/news-sources.example.toml",
         "config/news-topics.example.toml",
         "config/runtime-schedule.example.toml",
@@ -105,6 +106,7 @@ PUBLIC_TEST_PREFIX = "tests/news_pipeline/"
 EXPORT_EXCLUDED_EXACT: frozenset[str] = frozenset(
     {
         "config/news-policy.toml",
+        "config/news-provenance.toml",
         "config/news-sources.toml",
         "config/news-topics.toml",
         "STAGING_MANIFEST.json",
@@ -301,7 +303,7 @@ def _line_spans(*lines: int) -> tuple[tuple[int, int], ...]:
 
 CONTENT_SPAN_ALLOWANCES: dict[str, dict[str, tuple[tuple[int, int], ...]]] = {
     "README.md": {"MAINTAINER_LITERAL": _line_spans(43, 45)},
-    "ARCHITECTURE.md": {"MAINTAINER_LITERAL": _line_spans(126, 131)},
+    "ARCHITECTURE.md": {"MAINTAINER_LITERAL": _line_spans(147, 152)},
     "CONTRIBUTING.md": {"MAINTAINER_LITERAL": _line_spans(52)},
     "SECURITY.md": {
         "MAINTAINER_LITERAL": _line_spans(46, 47, 48, 49, 116),

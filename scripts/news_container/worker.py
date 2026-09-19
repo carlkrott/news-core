@@ -91,7 +91,7 @@ def _ingest_argv(ctx: DispatchContext) -> list[str]:
     Uses the network gate so the dispatch is faithful to the existing
     news_pipeline.jobs contract; live delivery is *not* enabled.
     """
-    return [
+    argv = [
         "tick",
         "--db", str(ctx.db_path),
         "--sources", _require_payload(ctx, "sources"),
@@ -100,6 +100,12 @@ def _ingest_argv(ctx: DispatchContext) -> list[str]:
         "--run-started-at", ctx.due_slot_utc,
         "--enable-network",
     ]
+    provenance = ctx.payload.get("provenance")
+    if provenance is not None:
+        if not isinstance(provenance, str) or not provenance:
+            raise ValueError("payload field 'provenance' must be a non-empty string")
+        argv[argv.index("--run-started-at"):argv.index("--run-started-at")] = ["--provenance", provenance]
+    return argv
 
 
 def _process_argv(ctx: DispatchContext) -> list[str]:

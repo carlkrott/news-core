@@ -112,21 +112,37 @@ def verify_evidence(evidence: Iterable[Mapping[str, object]]) -> VerificationSta
     contradicts = []
     for row in rows:
         role = _value(row.get("role"))
-        source_role = _value(row.get("source_role"))
+        source_role_key = "effective_source_role" if "effective_source_role" in row else "source_role"
+        source_role = _value(row.get(source_role_key))
         group = row.get("independence_group")
         group = group.strip() if isinstance(group, str) else ""
+        authority = row.get("authority_match")
+        # Legacy direct callers may still provide source_role. Persisted
+        # verification rows must provide effective provenance explicitly.
+        if source_role_key == "effective_source_role" and type(authority) is not bool:
+            authority = None
+        elif source_role_key == "source_role" and "authority_match" not in row:
+            # Transitional compatibility for pre-v7 direct callers only; the
+            # persisted v7 event path must provide explicit authority_match.
+            authority = source_role == "primary"
         normalized = dict(row)
-        normalized.update(role=role, source_role=source_role, independence_group=group)
+        normalized.update(
+            role=role,
+            effective_source_role=source_role,
+            independence_group=group,
+            authority_match=authority,
+        )
         if role == EvidenceRole.CONTRADICTS.value:
             contradicts.append(normalized)
         elif role == EvidenceRole.SUPPORTS.value and source_role in {"primary", "neutral", "specialist"}:
-            supports.append(normalized)
+            if group and type(authority) is bool:
+                supports.append(normalized)
     if contradicts:
         return VerificationState.WATCHLIST
-    if any(row["source_role"] == "primary" for row in supports):
+    if any(row["effective_source_role"] == "primary" and row["authority_match"] is True for row in supports):
         return VerificationState.VERIFIED
     groups = {row["independence_group"] for row in supports if row["independence_group"]}
-    roles = {row["source_role"] for row in supports}
+    roles = {row["effective_source_role"] for row in supports}
     if len(groups) >= 2 and roles & {"neutral", "specialist"}:
         return VerificationState.VERIFIED
     return VerificationState.UNVERIFIED

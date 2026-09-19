@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 
 from news_pipeline.claim_pipeline import claims_from_observation, observation_id_to_source_item_id
-from news_pipeline.live_contracts import ObservationContract, ObservationKind
+from news_pipeline.live_contracts import ObservationContract, ObservationKind, SourceRole
 
 
 class ClaimPipelineTests(unittest.TestCase):
@@ -25,6 +26,19 @@ class ClaimPipelineTests(unittest.TestCase):
         self.assertTrue(first.claims)
         for evidence in first.evidence:
             self.assertEqual(evidence.excerpt_hash, hashlib.sha256(evidence.exact_excerpt.encode()).hexdigest())
+
+    def test_evidence_uses_reviewed_independence_group_not_publisher_text(self):
+        observation = replace(
+            self.observation(),
+            publisher="Same Publisher",
+            effective_source_role=SourceRole.SPECIALIST,
+            independence_group="reviewed-trade-family",
+            publisher_host="trade.example.com",
+            classification_reason="matched_rule",
+        )
+        rows = claims_from_observation(observation)
+        self.assertEqual(rows.evidence[0].independence_group, "reviewed-trade-family")
+        self.assertNotEqual(rows.evidence[0].independence_group, observation.publisher.casefold())
 
     def test_observation_mapping_rejects_unmapped_id(self):
         con = sqlite3.connect(":memory:")

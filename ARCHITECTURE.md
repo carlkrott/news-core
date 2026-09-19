@@ -121,6 +121,27 @@ directory, or a host identity path.
 * The canary schedule and config are isolated and cannot point to
   production state paths.
 
+### Publisher provenance and verification identity
+
+Discovery adapter identity and publisher evidence identity are separate.  The
+`source_items` adapter/source fields describe how a result was discovered;
+post-v6 provenance tables record the normalized publisher host, reviewed
+publisher family, effective evidence role, authority match, and classification
+reason used for verification.  Unknown publishers are retained as
+`unknown_reviewed`/discovery and cannot verify a claim by themselves.
+
+A one-source primary claim requires an explicit authority match.  Multiple
+articles from one reviewed publisher family count as one independence group;
+contradictory evidence still produces `watchlist` rather than being promoted.
+`config/news-provenance.example.toml` is sanitized documentation only.  The
+public image copies that example under its runtime filename; an operator may
+supply a private reviewed file through the optional provenance path, and that
+file takes precedence without entering the export.  Live publisher rules and
+operator bindings remain private deployment overlays and must never be
+committed to the public repository.  Schema-v7 application is an additive,
+replay-safe structural path; this change does not migrate a live DB, change
+schedules, or activate delivery.
+
 ## 7. ZeroClaw integration (optional, downstream)
 
 Zeroclaw is **not** a dependency of the news core.  If the operator
