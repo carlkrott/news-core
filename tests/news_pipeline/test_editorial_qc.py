@@ -181,6 +181,15 @@ class SubjectInputValidationTests(unittest.TestCase):
         self.assertEqual(ctx.exception.reason, EditorialQCReason.SUBJECT_MISMATCH)
         self.assertEqual(ctx.exception.subject, Subject.AI)
 
+    def test_error_identity_contains_event_subject_and_version(self) -> None:
+        bad = _input(Subject.PROFESSIONAL_AV, event_id="evt-av-identity")
+        with self.assertRaises(EditorialQCError) as ctx:
+            validate_subject_inputs(Subject.AI, [bad])
+        self.assertEqual(
+            ctx.exception.identity,
+            ("evt-av-identity", Subject.PROFESSIONAL_AV.value, 1),
+        )
+
     def test_duplicate_event_identity_rejected(self) -> None:
         a = _input(Subject.AI, event_id="evt-same", event_version=2)
         b = _input(Subject.AI, event_id="evt-same", event_version=2, title="Other")

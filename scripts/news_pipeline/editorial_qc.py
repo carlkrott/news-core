@@ -419,7 +419,7 @@ def validate_subject_inputs(
                 f"input {index} subject {item.subject.value!r} does not match "
                 f"requested subject {primary_subject.value!r}",
                 subject=primary_subject,
-                identity=(item.event_id, item.event_id, item.event_version),
+                identity=(item.event_id, item.subject.value, item.event_version),
             )
         # Re-validate event_id explicitly so we surface the typed reason.
         if not item.event_id:
@@ -427,7 +427,7 @@ def validate_subject_inputs(
                 EditorialQCReason.MISSING_EVENT_IDENTITY,
                 f"input {index} has empty event_id",
                 subject=primary_subject,
-                identity=("", "", item.event_version),
+                identity=("", primary_subject.value, item.event_version),
             )
         key = (item.event_id, item.event_version)
         if key in seen_identities:
@@ -435,7 +435,7 @@ def validate_subject_inputs(
                 EditorialQCReason.DUPLICATE_EVENT_IDENTITY,
                 f"duplicate event identity {key!r} at input {index}",
                 subject=primary_subject,
-                identity=(item.event_id, item.event_id, item.event_version),
+                identity=(item.event_id, item.subject.value, item.event_version),
             )
         seen_identities[key] = item
         # All-subject input is forbidden — that is a report-scope bug,
@@ -456,7 +456,7 @@ def validate_subject_inputs(
                     f"input {index} policy.subject {policy_subject.value!r} "
                     f"does not match subject {primary_subject.value!r}",
                     subject=primary_subject,
-                    identity=(item.event_id, item.event_id, item.event_version),
+                    identity=(item.event_id, item.subject.value, item.event_version),
                 )
     return normalized
 
@@ -489,7 +489,7 @@ def _reject_all_subject_marker(
                 f"input {index} carries the all-subjects marker; "
                 "per-subject QC requires subject-bounded inputs",
                 subject=normalized_subject,
-                identity=(item.event_id, item.event_id, item.event_version),
+                identity=(item.event_id, item.subject.value, item.event_version),
             )
     return materialized
 
@@ -559,7 +559,7 @@ def validate_subject_outputs(
                 EditorialQCReason.DUPLICATE_EVENT_IDENTITY,
                 f"duplicate event identity {identity_key!r} at output {index}",
                 subject=normalized_subject,
-                identity=(item_out.event_id, item_out.event_id, item_out.event_version),
+                identity=(item_out.event_id, item_out.subject.value, item_out.event_version),
             )
         if item_out.subject is not normalized_subject:
             raise EditorialQCError(
@@ -567,7 +567,7 @@ def validate_subject_outputs(
                 f"output {index} subject {item_out.subject.value!r} does not "
                 f"match requested subject {normalized_subject.value!r}",
                 subject=normalized_subject,
-                identity=(item_out.event_id, item_out.event_id, item_out.event_version),
+                identity=(item_out.event_id, item_out.subject.value, item_out.event_version),
             )
         if item_out.event_id != item_in.event_id or item_out.event_version != item_in.event_version:
             raise EditorialQCError(
@@ -577,7 +577,7 @@ def validate_subject_outputs(
                 f"does not match input identity "
                 f"({item_in.event_id!r}, {item_in.event_version!r})",
                 subject=normalized_subject,
-                identity=(item_out.event_id, item_out.event_id, item_out.event_version),
+                identity=(item_out.event_id, item_out.subject.value, item_out.event_version),
             )
         seen_identities.add(identity_key)
 
@@ -589,7 +589,7 @@ def validate_subject_outputs(
                 f"does not match any input source_url for event "
                 f"{item_in.event_id!r} v{item_in.event_version}",
                 subject=normalized_subject,
-                identity=(item_out.event_id, item_out.event_id, item_out.event_version),
+                identity=(item_out.event_id, item_out.subject.value, item_out.event_version),
             )
 
         # fact_deltas must exactly match.
@@ -599,7 +599,7 @@ def validate_subject_outputs(
                 f"output {index} fact_deltas do not match input for event "
                 f"{item_in.event_id!r} v{item_in.event_version}",
                 subject=normalized_subject,
-                identity=(item_out.event_id, item_out.event_id, item_out.event_version),
+                identity=(item_out.event_id, item_out.subject.value, item_out.event_version),
             )
 
         # Narrative constraints.
@@ -611,7 +611,7 @@ def validate_subject_outputs(
                     EditorialQCReason.FACT_DELTA_MISMATCH,
                     f"output {index} {field_name} contains forbidden controls",
                     subject=normalized_subject,
-                    identity=(item_out.event_id, item_out.event_id, item_out.event_version),
+                    identity=(item_out.event_id, item_out.subject.value, item_out.event_version),
                 )
             if len(scrubbed) < NARRATIVE_MIN_LEN or len(scrubbed) > NARRATIVE_MAX_LEN:
                 raise EditorialQCError(
@@ -619,14 +619,14 @@ def validate_subject_outputs(
                     f"output {index} {field_name} length {len(scrubbed)} "
                     f"outside [{NARRATIVE_MIN_LEN},{NARRATIVE_MAX_LEN}]",
                     subject=normalized_subject,
-                    identity=(item_out.event_id, item_out.event_id, item_out.event_version),
+                    identity=(item_out.event_id, item_out.subject.value, item_out.event_version),
                 )
             if _looks_like_filler_preamble(scrubbed):
                 raise EditorialQCError(
                     EditorialQCReason.FILLER_PREAMBLE,
                     f"output {index} {field_name} begins with a filler/marketing preamble",
                     subject=normalized_subject,
-                    identity=(item_out.event_id, item_out.event_id, item_out.event_version),
+                    identity=(item_out.event_id, item_out.subject.value, item_out.event_version),
                 )
             # Any URL in the narrative must already be in the input's
             # allowed source_urls.
@@ -638,7 +638,7 @@ def validate_subject_outputs(
                         f"output {index} {field_name} references URL "
                         f"{narrative_url!r} that is not in input source_urls",
                         subject=normalized_subject,
-                        identity=(item_out.event_id, item_out.event_id, item_out.event_version),
+                        identity=(item_out.event_id, item_out.subject.value, item_out.event_version),
                     )
 
     return normalized_outputs
@@ -758,7 +758,7 @@ def render_summary(outputs: Iterable[SubjectEditorialOutput]) -> SubjectSummary:
                 f"subject {item.subject.value!r}, expected "
                 f"{primary_subject.value!r}",
                 subject=primary_subject,
-                identity=(item.event_id, item.event_id, item.event_version),
+                identity=(item.event_id, item.subject.value, item.event_version),
             )
         header = f"[{item.event_id} v{item.event_version}]"
         lines.append(f"{header} {item.what_changed}")
