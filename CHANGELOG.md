@@ -52,6 +52,13 @@ All notable changes to the public news-core source are recorded here.
   cacheable only after QC, and empty subject reports expose an explicit
   no-delivery state. Public workers remain delivery-disabled; this structural
   change performs no live migration or schedule activation.
+- Added Run 8 subject-scoped delivery contracts: additive schema v9 stores
+  deterministic content revisions, prepared outbox rows, exact attempts, and
+  terminal sent/failed/ambiguous/skipped receipts. Report generation no longer
+  invokes delivery in the same job; the operator-only delivery command is not
+  part of the public scheduler vocabulary. Public workers remain
+  delivery-disabled, and this change performs no live migration, private
+  schedule activation, recipient binding, or external send.
 
 ## [0.1.0] - 2026-09-15
 

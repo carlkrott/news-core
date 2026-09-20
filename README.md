@@ -83,6 +83,21 @@ subject inclusion/exclusion rules, recency windows, materiality rules, and
 story caps.  They are placeholders only; live source registries, operator
 bindings, state, and credentials are not part of this repository.
 
+## Subject delivery contract
+
+Schema v9 adds public, additive contracts for subject report revisions, an
+outbox, and exact delivery attempts.  Identity includes the parent report,
+subject, and rendered-content hash, so replaying identical content is a no-op
+while changed content becomes a new immutable revision.  Generation persists
+the report/outbox boundary only; the separate `daily-deliver` action consumes
+an already-generated report and never invokes model or report generation.
+
+The public scheduler, control store, and workers still reject the operator-only
+`delivery` kind.  Live subject schedules, recipient/channel bindings,
+credentials, and the private delivery adapter remain outside this repository.
+No schema migration or delivery activation occurs merely by building or
+running the public source.
+
 ## Quick start (portable, no live delivery)
 
 ```bash

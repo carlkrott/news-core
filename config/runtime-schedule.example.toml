@@ -10,7 +10,9 @@
 # Allowed ``kind`` values are exactly: ``ingest``, ``investigate``,
 # ``process``, ``validate``, ``report``.  ``investigate`` jobs are normally
 # created per candidate by ingest rather than scheduled as a mixed batch.
-# ``delivery`` is refused at every layer.
+# ``delivery`` is operator-only and remains outside this public schedule.
+# Public scheduler/control-store/worker layers refuse that kind; exact subject
+# schedules and recipient bindings belong to a private deployment overlay.
 #
 # Notes:
 # * The validate sweep runs after the delivery-disabled shadow report so a
