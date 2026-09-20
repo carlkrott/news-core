@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Mapping
 
 from .contracts import CandidateArticle, FilterResult, HistoryMatch
-from .event_contracts import AdjudicationResult, EventCandidate, ModelRequest, SemanticDecision
+from .event_contracts import AdjudicationResult, EventCandidate, FactDelta, ModelRequest, SemanticDecision
 from .filtering import evaluate_candidates
 from .history import HistoryUnavailable, fetch_history_match, open_history
 from .live_contracts import QueryPlanContract, stable_id
@@ -175,6 +175,16 @@ def _decision_kind(semantic_decision: SemanticDecision) -> str:
     return "manual_review"
 
 
+def _fact_delta_json(delta: FactDelta) -> dict[str, str]:
+    return {
+        "kind": delta.kind.value,
+        "unit": delta.unit,
+        "old_value": delta.old_value,
+        "new_value": delta.new_value,
+        "topic_gate": str(delta.topic_gate),
+    }
+
+
 def _reason_json(
     source_item_id: str,
     filter_result: FilterResult,
@@ -191,6 +201,11 @@ def _reason_json(
             "audit_only": filter_result.audit_only,
             "semantic_decision": semantic_result.semantic_decision.value,
             "semantic_reasons": [reason.value for reason in semantic_result.semantic_reasons],
+            "event_id": semantic_result.event_id,
+            "event_version": semantic_result.event_version,
+            "subject_id": semantic_result.subject_id,
+            "fact_deltas": [_fact_delta_json(delta) for delta in semantic_result.fact_deltas],
+            "subject_suppressed": semantic_result.subject_suppressed,
             "source_item_id": source_item_id,
         },
         ensure_ascii=False,

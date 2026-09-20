@@ -70,6 +70,47 @@ class EventStoreTests(unittest.TestCase):
         self.assertEqual(con.execute("SELECT COUNT(*) FROM delivery_attempts").fetchone()[0], 0)
         con.close()
 
+    def test_suppressed_material_update_does_not_allocate_event_version(self):
+        con = sqlite3.connect(self.path)
+        con.execute(
+            "UPDATE decisions SET reason=? WHERE id='d'",
+            (json.dumps({
+                "source_item_id": "i",
+                "matched_observation_ids": [],
+                "semantic_decision": "distinct_event",
+                "event_id": "e-primary",
+                "event_version": 1,
+            }),),
+        )
+        con.commit()
+        con.close()
+        self._item("i2", title="Widget v2.1", body="Widget v2.1 launched on 2026-09-07")
+        self._decision(
+            "d2",
+            "i2",
+            semantic_decision="material_update",
+            event_id="e-primary",
+            event_version=2,
+            subject_suppressed=True,
+            fact_deltas=[{
+                "kind": "date",
+                "unit": "release_date",
+                "old_value": "2026-09-06",
+                "new_value": "2026-09-07",
+                "topic_gate": 0.9,
+            }],
+        )
+        report = process_phase4(self.path, "2026-09-07T00:10:00Z")
+        self.assertEqual(report.processed, 2)
+        self.assertEqual(report.versions_appended, 1)
+        con = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(con.execute("SELECT MAX(version) FROM event_versions WHERE event_id='e-primary'").fetchone()[0], 1)
+            self.assertGreater(con.execute("SELECT COUNT(*) FROM claims WHERE source_item_id='i2'").fetchone()[0], 0)
+            self.assertGreater(con.execute("SELECT COUNT(*) FROM claim_evidence WHERE source_item_id='i2'").fetchone()[0], 0)
+        finally:
+            con.close()
+
     def test_append_update_closes_only_predecessor(self):
         con = sqlite3.connect(self.path)
         con.execute("PRAGMA foreign_keys=ON")

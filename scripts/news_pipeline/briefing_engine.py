@@ -467,15 +467,22 @@ def _canonical_payload_for_briefing_input(
     allowed to carry any sensitive key.
     """
     candidate = included.briefing_input.event_candidate.candidate
-    return normalize_canonical_payload(
-        {
-            "candidate_id": included.briefing_input.candidate_id,
-            "category": included.briefing_input.category.value,
-            "decision": decision_value,
-            "title": candidate.title,
-            "summary": included.summary_item.summary,
-        }
-    )
+    payload = {
+        "candidate_id": included.briefing_input.delivery_identity,
+        "category": included.briefing_input.category.value,
+        "decision": decision_value,
+        "title": candidate.title,
+        "summary": included.summary_item.summary,
+    }
+    if included.briefing_input.event_id is not None:
+        payload.update(
+            {
+                "subject_id": included.briefing_input.subject_id,
+                "event_id": included.briefing_input.event_id,
+                "event_version": included.briefing_input.event_version or 1,
+            }
+        )
+    return normalize_canonical_payload(payload)
 
 
 # -----------------------------------------------------------------------------=
@@ -605,28 +612,28 @@ class BriefingEngine:
 
         # Pre-collect candidate IDs for a single shadow-seen lookup.
         ordered_ids: list[str] = []
-        candidate_id_set: set = set()
+        delivery_id_set: set = set()
         for bi in briefing_inputs:
-            cid = bi.candidate_id
-            if cid in candidate_id_set:
+            delivery_id = bi.delivery_identity
+            if delivery_id in delivery_id_set:
                 raise ValueError(
-                    f"briefing_inputs contains duplicate candidate_id: {cid!r}"
+                    f"briefing_inputs contains duplicate delivery identity: {delivery_id!r}"
                 )
-            candidate_id_set.add(cid)
-            ordered_ids.append(cid)
+            delivery_id_set.add(delivery_id)
+            ordered_ids.append(delivery_id)
         shadow_seen = self._ledger.seen_candidate_ids(tuple(ordered_ids))
         seen_before = set(shadow_seen)
 
         # Map every decision before shadow-seen filtering so overlap cases
         # still receive the typed eligibility result.
         eligibility_by_id = {
-            bi.candidate_id: map_eligibility(bi) for bi in briefing_inputs
+            bi.delivery_identity: map_eligibility(bi) for bi in briefing_inputs
         }
         eligible_inputs: list[Tuple[BriefingInput, EligibilityResult]] = []
         for bi in briefing_inputs:
-            cid = bi.candidate_id
-            eligibility = eligibility_by_id[cid]
-            if cid in seen_before:
+            delivery_id = bi.delivery_identity
+            eligibility = eligibility_by_id[delivery_id]
+            if delivery_id in seen_before:
                 excluded_items.append(
                     EngineExcludedItem(
                         briefing_input=bi,
@@ -685,8 +692,8 @@ class BriefingEngine:
             for bi in items_in_category:
                 candidate = bi.event_candidate.candidate
                 if _raw_bounds_invalid(bi):
-                    direct_fallbacks[bi.candidate_id] = SummaryItem(
-                        candidate_id=bi.candidate_id,
+                    direct_fallbacks[bi.delivery_identity] = SummaryItem(
+                        candidate_id=bi.delivery_identity,
                         summary="Input bounds exceeded",
                         source=SummarySource.FALLBACK,
                         error_category=SummarizerErrorCategory.INPUT_BOUNDS,
@@ -707,7 +714,7 @@ class BriefingEngine:
                 included_items.append(
                     EngineIncludedItem(
                         briefing_input=bi,
-                        summary_item=cid_to_summary[bi.candidate_id],
+                        summary_item=cid_to_summary[bi.delivery_identity],
                     )
                 )
             if direct_fallbacks:
@@ -727,13 +734,13 @@ class BriefingEngine:
                 continue
             cat = included.briefing_input.category
             per_category_counter[cat] = per_category_counter.get(cat, 0)
-            ordinal_by_id[included.briefing_input.candidate_id] = (
+            ordinal_by_id[included.briefing_input.delivery_identity] = (
                 per_category_counter[cat]
             )
             per_category_counter[cat] += 1
 
         fact_deltas_by_id: Dict[str, Tuple[FactDelta, ...]] = {
-            included.briefing_input.candidate_id: tuple(
+            included.briefing_input.delivery_identity: tuple(
                 included.briefing_input.adjudication.fact_deltas
             )
             for included in included_items_tuple
@@ -746,9 +753,9 @@ class BriefingEngine:
                 _build_render_record(
                     included=included,
                     fact_deltas=fact_deltas_by_id[
-                        included.briefing_input.candidate_id
+                        included.briefing_input.delivery_identity
                     ],
-                    ordinal=ordinal_by_id[included.briefing_input.candidate_id],
+                    ordinal=ordinal_by_id[included.briefing_input.delivery_identity],
                 )
             )
 
@@ -759,7 +766,7 @@ class BriefingEngine:
 
         # Build ShadowEvent list and complete the ledger ONLY after render.
         decision_by_id: Dict[str, SemanticDecision] = {
-            included.briefing_input.candidate_id: (
+            included.briefing_input.delivery_identity: (
                 included.briefing_input.adjudication.semantic_decision
             )
             for included in included_items_tuple
@@ -768,15 +775,26 @@ class BriefingEngine:
         for included in included_items_tuple:
             if _raw_bounds_invalid(included.briefing_input):
                 continue
-            decision = decision_by_id[included.briefing_input.candidate_id]
+            decision = decision_by_id[included.briefing_input.delivery_identity]
             payload = _canonical_payload_for_briefing_input(included, decision.value)
             shadow_events.append(
                 ShadowEvent(
-                    candidate_id=included.briefing_input.candidate_id,
+                    candidate_id=included.briefing_input.delivery_identity,
                     category=included.briefing_input.category,
                     decision=decision,
                     payload_json=payload,
                     recorded_at_utc=updated_z,
+                    subject_id=(
+                        included.briefing_input.subject_id
+                        if included.briefing_input.event_id is not None
+                        else None
+                    ),
+                    event_id=included.briefing_input.event_id,
+                    event_version=(
+                        included.briefing_input.event_version or 1
+                        if included.briefing_input.event_id is not None
+                        else None
+                    ),
                 )
             )
 
@@ -835,7 +853,7 @@ class BriefingEngine:
         from .briefing_summarizer import SummarizerInput
         candidate = bi.event_candidate.candidate
         return SummarizerInput(
-            candidate_id=bi.candidate_id,
+            candidate_id=bi.delivery_identity,
             title=candidate.title,
             snippet=candidate.snippet,
             url=bi.url,

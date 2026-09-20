@@ -19,6 +19,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, Sequence
 
 from .contracts import HistoryMatch
 from .models import Category
@@ -40,6 +41,7 @@ class _HistoryConnection:
 
     path: str
     con: sqlite3.Connection
+    has_event_versions: bool = False
 
     def __enter__(self) -> "_HistoryConnection":
         return self
@@ -106,7 +108,10 @@ def open_history(db_path: str, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> _Hi
         except sqlite3.Error:
             pass
         raise HistoryUnavailable(f"history: pragma setup failed: {exc}") from exc
-    return _HistoryConnection(path=db_path, con=con)
+    has_event_versions = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='event_versions'"
+    ).fetchone() is not None
+    return _HistoryConnection(path=db_path, con=con, has_event_versions=has_event_versions)
 
 
 def _parse_iso(ts: str) -> datetime:
@@ -117,6 +122,33 @@ def _parse_iso(ts: str) -> datetime:
 
 def _format_upper_iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _history_match(history: _HistoryConnection, row: Sequence[Any]) -> HistoryMatch:
+    """Build a HistoryMatch while preserving optional durable event identity."""
+    event_id = row[8] if len(row) > 8 else None
+    event_version = None
+    if event_id and history.has_event_versions:
+        try:
+            version_row = history.con.execute(
+                "SELECT MAX(version) FROM event_versions WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise HistoryUnavailable(f"history: event version lookup failed: {exc}") from exc
+        event_version = version_row[0] if version_row and version_row[0] is not None else 1
+    return HistoryMatch(
+        article_id=row[0],
+        observation_id=row[1],
+        category=Category(row[2]),
+        occurred_at=row[3],
+        title=row[4] or "",
+        snippet=row[5] or "",
+        canonical_url=row[6],
+        identity_basis=row[7] or "legacy",
+        event_id=event_id,
+        event_version=event_version,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +178,7 @@ def find_exact_url(
     if cross_category:
         sql = (
             "SELECT a.id, o.id, o.category, o.occurred_at, a.title, a.snippet, "
-            "a.canonical_url, a.identity_basis "
+            "a.canonical_url, a.identity_basis, o.event_id "
             "FROM articles a JOIN observations o "
             "ON o.article_id = a.id AND o.kind = 'parsed_article' "
             "WHERE a.canonical_url = ? "
@@ -159,7 +191,7 @@ def find_exact_url(
             raise HistoryUnavailable("history: category required for non-cross-category URL lookup")
         sql = (
             "SELECT a.id, o.id, o.category, o.occurred_at, a.title, a.snippet, "
-            "a.canonical_url, a.identity_basis "
+            "a.canonical_url, a.identity_basis, o.event_id "
             "FROM articles a JOIN observations o "
             "ON o.article_id = a.id AND o.kind = 'parsed_article' "
             "WHERE a.canonical_url = ? AND o.category = ? "
@@ -173,16 +205,7 @@ def find_exact_url(
         raise HistoryUnavailable(f"history: find_exact_url failed: {exc}") from exc
     if row is None:
         return None
-    return HistoryMatch(
-        article_id=row[0],
-        observation_id=row[1],
-        category=Category(row[2]),
-        occurred_at=row[3],
-        title=row[4] or "",
-        snippet=row[5] or "",
-        canonical_url=row[6],
-        identity_basis=row[7] or "legacy",
-    )
+    return _history_match(history, row)
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +230,7 @@ def find_exact_identity(
     lower_iso = _format_upper_iso(evaluated_dt - lookback)
     sql = (
         "SELECT a.id, o.id, o.category, o.occurred_at, a.title, a.snippet, "
-        "a.canonical_url, a.identity_basis "
+        "a.canonical_url, a.identity_basis, o.event_id "
         "FROM articles a JOIN observations o "
         "ON o.article_id = a.id AND o.kind = 'parsed_article' "
         "WHERE a.id = ? AND o.category = ? "
@@ -222,16 +245,7 @@ def find_exact_identity(
         raise HistoryUnavailable(f"history: find_exact_identity failed: {exc}") from exc
     if row is None:
         return None
-    return HistoryMatch(
-        article_id=row[0],
-        observation_id=row[1],
-        category=Category(row[2]),
-        occurred_at=row[3],
-        title=row[4] or "",
-        snippet=row[5] or "",
-        canonical_url=row[6],
-        identity_basis=row[7] or "legacy",
-    )
+    return _history_match(history, row)
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +271,7 @@ def find_exact_title(
     lower_iso = _format_upper_iso(evaluated_dt - lookback)
     sql = (
         "SELECT a.id, o.id, o.category, o.occurred_at, a.title, a.snippet, "
-        "a.canonical_url, a.identity_basis "
+        "a.canonical_url, a.identity_basis, o.event_id "
         "FROM articles a JOIN observations o "
         "ON o.article_id = a.id AND o.kind = 'parsed_article' "
         "WHERE lower(trim(a.normalized_title)) = ? AND o.category = ? "
@@ -272,16 +286,7 @@ def find_exact_title(
         raise HistoryUnavailable(f"history: find_exact_title failed: {exc}") from exc
     if row is None:
         return None
-    return HistoryMatch(
-        article_id=row[0],
-        observation_id=row[1],
-        category=Category(row[2]),
-        occurred_at=row[3],
-        title=row[4] or "",
-        snippet=row[5] or "",
-        canonical_url=row[6],
-        identity_basis=row[7] or "legacy",
-    )
+    return _history_match(history, row)
 
 
 def fetch_history_match(
@@ -296,7 +301,7 @@ def fetch_history_match(
     """
     sql = (
         "SELECT a.id, o.id, o.category, o.occurred_at, a.title, a.snippet, "
-        "a.canonical_url, a.identity_basis "
+        "a.canonical_url, a.identity_basis, o.event_id "
         "FROM articles a JOIN observations o "
         "ON o.article_id = a.id "
         "WHERE a.id = ? AND o.id = ? AND o.kind = 'parsed_article' "
@@ -308,13 +313,4 @@ def fetch_history_match(
         raise HistoryUnavailable(f"history: fetch_history_match failed: {exc}") from exc
     if row is None:
         return None
-    return HistoryMatch(
-        article_id=row[0],
-        observation_id=row[1],
-        category=Category(row[2]),
-        occurred_at=row[3],
-        title=row[4] or "",
-        snippet=row[5] or "",
-        canonical_url=row[6],
-        identity_basis=row[7] or "legacy",
-    )
+    return _history_match(history, row)

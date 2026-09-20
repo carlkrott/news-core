@@ -5,11 +5,13 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, cast
 
 from .claim_pipeline import claims_from_observation, observation_from_source_item, persist_claim_rows_counts
 from .adjudication import _family_hits, _has_positive
+from .event_contracts import FactDelta, FactKind, event_version_identity
 from .live_contracts import VerificationState, stable_id
 from .schema_v5 import _validate_v5
 from .verification import plan_corroboration_queries, verify_evidence
@@ -24,6 +26,11 @@ class EventWrite:
     valid_from: str = ""
     claim_ids: tuple[str, ...] = ()
     retraction: bool = False
+    semantic_decision: str | None = None
+    fact_deltas: tuple[object, ...] = ()
+    event_version: int | None = None
+    subject_id: str | None = None
+    subject_suppressed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +54,11 @@ class Phase4Report:
     def event_versions_inserted(self): return self.versions_appended
 
 
+def event_version_key(subject_id: str, event_id: str, event_version: int) -> str:
+    """Return the ledger's canonical subject/event/version identity."""
+    return event_version_identity(subject_id, event_id, event_version)
+
+
 def _timestamp(value: object, name: str) -> str:
     if type(value) is not str or not value.endswith("Z"):
         raise ValueError(f"{name} must be a UTC ISO-8601 timestamp ending in Z")
@@ -63,15 +75,68 @@ def _decision_value(decision):
     if isinstance(decision, Mapping):
         value = dict(decision)
     else:
-        names = ("event_id", "summary", "material_change_reason", "verification_state", "valid_from", "claim_ids", "retraction")
+        names = (
+            "event_id", "summary", "material_change_reason", "verification_state",
+            "valid_from", "claim_ids", "retraction", "semantic_decision",
+            "fact_deltas", "event_version", "subject_id", "subject_suppressed", "decision",
+        )
         value = {name: getattr(decision, name) for name in names if hasattr(decision, name)}
     if type(value) is not dict:
         raise ValueError("decision must be a mapping or EventWrite")
     return value
 
 
-def _event_write_fields(item: Mapping) -> tuple[str, str, str, str, str, tuple[str, ...], bool]:
-    allowed = {"event_id", "summary", "material_change_reason", "reason", "verification_state", "valid_from", "evaluated_at", "claim_ids", "retraction"}
+def _validated_fact_deltas(raw_deltas: object) -> tuple[object, ...]:
+    if type(raw_deltas) not in (tuple, list):
+        raise ValueError("fact_deltas must be a tuple or list")
+    deltas = tuple(cast(tuple[object, ...] | list[object], raw_deltas))
+    for delta in deltas:
+        def valid_topic_gate(value: object) -> bool:
+            try:
+                gate = Decimal(str(value))
+            except (InvalidOperation, ValueError):
+                return False
+            return gate.is_finite() and Decimal("0") <= gate <= Decimal("1")
+
+        if isinstance(delta, FactDelta):
+            valid = (
+                type(delta.unit) is str
+                and bool(delta.unit.strip())
+                and type(delta.old_value) is str
+                and type(delta.new_value) is str
+                and bool(delta.old_value.strip())
+                and bool(delta.new_value.strip())
+                and delta.old_value != delta.new_value
+                and valid_topic_gate(delta.topic_gate)
+            )
+        elif isinstance(delta, Mapping):
+            kind = delta.get("kind")
+            kind_value = getattr(kind, "value", kind)
+            valid = (
+                kind_value in {member.value for member in FactKind}
+                and type(delta.get("unit")) is str
+                and bool(delta["unit"].strip())
+                and type(delta.get("old_value")) is str
+                and type(delta.get("new_value")) is str
+                and bool(delta["old_value"].strip())
+                and bool(delta["new_value"].strip())
+                and delta["old_value"] != delta["new_value"]
+                and valid_topic_gate(delta.get("topic_gate"))
+            )
+        else:
+            valid = False
+        if not valid:
+            raise ValueError("fact_deltas must contain grounded FactDelta records")
+    return deltas
+
+
+def _event_write_fields(item: Mapping) -> tuple[str, str, str, str, str, tuple[str, ...], bool, str | None, tuple[object, ...], int | None, str | None, bool]:
+    allowed = {
+        "event_id", "summary", "material_change_reason", "reason",
+        "verification_state", "valid_from", "evaluated_at", "claim_ids",
+        "retraction", "semantic_decision", "decision", "fact_deltas",
+        "event_version", "subject_id", "subject_suppressed",
+    }
     if any(key not in allowed for key in item):
         raise ValueError("event version mapping contains unknown keys")
     event_id, summary = item.get("event_id"), item.get("summary")
@@ -82,15 +147,35 @@ def _event_write_fields(item: Mapping) -> tuple[str, str, str, str, str, tuple[s
     if type(state) is not str or state not in {x.value for x in VerificationState}:
         raise ValueError("invalid verification_state")
     _timestamp(valid_from, "valid_from")
+    semantic = item.get("semantic_decision", item.get("decision"))
+    if semantic is not None:
+        semantic = getattr(semantic, "value", semantic)
+        if semantic not in {"distinct_event", "material_update", "rewrite"}:
+            raise ValueError("invalid semantic_decision")
     raw_ids = item.get("claim_ids", ())
-    if type(raw_ids) not in (tuple, list) or not raw_ids or any(type(x) is not str or not x.strip() for x in raw_ids) or len(set(raw_ids)) != len(raw_ids):
+    if type(raw_ids) not in (tuple, list) or (semantic != "rewrite" and not raw_ids) or any(type(x) is not str or not x.strip() for x in raw_ids) or len(set(raw_ids)) != len(raw_ids):
         raise ValueError("claim_ids must be a duplicate-free sequence of strings")
     retraction = item.get("retraction", False)
     if type(retraction) is not bool:
         raise ValueError("retraction must be a boolean")
     if retraction:
         reason, state = "retraction", VerificationState.REJECTED.value
-    return event_id, summary, reason, state, valid_from, tuple(raw_ids), retraction
+    fact_deltas = _validated_fact_deltas(item.get("fact_deltas", ()))
+    if semantic == "material_update" and not fact_deltas:
+        raise ValueError("material_update requires at least one grounded fact/state delta")
+    expected_version = item.get("event_version")
+    if expected_version is not None and (type(expected_version) is not int or expected_version <= 0):
+        raise ValueError("event_version must be a positive int or None")
+    subject_id = item.get("subject_id")
+    if subject_id is not None and (type(subject_id) is not str or not subject_id.strip()):
+        raise ValueError("subject_id must be a non-empty string or None")
+    subject_suppressed = item.get("subject_suppressed", False)
+    if type(subject_suppressed) is not bool:
+        raise ValueError("subject_suppressed must be a boolean")
+    return cast(tuple[str, str, str, str, str, tuple[str, ...], bool, str | None, tuple[object, ...], int | None, str | None, bool], (
+        event_id, summary, reason, state, valid_from, tuple(raw_ids), retraction,
+        semantic, fact_deltas, expected_version, subject_id, subject_suppressed,
+    ))
 
 
 def _require_v5(connection: sqlite3.Connection) -> None:
@@ -158,9 +243,22 @@ def _append_locked(connection: sqlite3.Connection, decisions: Iterable[EventWrit
     written = 0
     for raw in tuple(decisions)[:max_items]:
         item = _decision_value(raw)
-        event_id, summary, reason, state, valid_from, claim_ids, _retraction = _event_write_fields(item)
+        (
+            event_id, summary, reason, state, valid_from, claim_ids, _retraction,
+            semantic, _fact_deltas, expected_version, _subject_id, subject_suppressed,
+        ) = _event_write_fields(item)
+        if subject_suppressed:
+            continue
         prior = connection.execute("SELECT version FROM event_versions WHERE event_id=? ORDER BY version DESC LIMIT 1", (event_id,)).fetchone()
         version = prior[0] + 1 if prior else 1
+        if semantic == "rewrite":
+            continue
+        if semantic == "distinct_event" and prior is not None:
+            continue
+        if expected_version is not None and expected_version != version:
+            raise ValueError(
+                f"event_version {expected_version} is stale; next durable version is {version}"
+            )
         latest = connection.execute("SELECT summary,material_change_reason,verification_state,valid_from,version FROM event_versions WHERE event_id=? ORDER BY version DESC LIMIT 1", (event_id,)).fetchone()
         linked = (tuple(r[0] for r in connection.execute("SELECT claim_id FROM event_claims WHERE event_id=? AND event_version=? ORDER BY claim_id", (event_id, latest[4]))) if latest else ())
         if latest and latest[:4] == (summary, reason, state, valid_from) and linked == tuple(sorted(claim_ids)):
@@ -242,6 +340,19 @@ def process_phase4(db_path: str | Path, evaluated_at: str, *, max_items: int = 1
         counts = [0,0,0,0,0,0,0,0,0]
         plans_remaining = max_corroboration_plans
         for decision_id, kind, reason, decided_at, source_item_id, _kind_of_run, _provenance in selected:
+            explicit_semantic = reason.get("semantic_decision", reason.get("decision"))
+            if explicit_semantic is not None:
+                explicit_semantic = getattr(explicit_semantic, "value", explicit_semantic)
+                if explicit_semantic not in {"distinct_event", "material_update", "rewrite"}:
+                    raise ValueError("invalid semantic_decision in Phase 3 decision")
+                if explicit_semantic == "rewrite":
+                    counts[7] += 1
+                    continue
+                if explicit_semantic == "material_update":
+                    _validated_fact_deltas(reason.get("fact_deltas", ()))
+            subject_suppressed = reason.get("subject_suppressed", False)
+            if type(subject_suppressed) is not bool:
+                raise ValueError("subject_suppressed in Phase 3 decision must be a boolean")
             columns = tuple(r[1] for r in connection.execute("PRAGMA table_info(source_items)"))
             if has_v7:
                 columns += (
@@ -284,12 +395,18 @@ def process_phase4(db_path: str | Path, evaluated_at: str, *, max_items: int = 1
                     state = verify_evidence(tuple({"role": r[0], "independence_group": r[1], "source_role": r[2]} for r in evidence_rows))
                 if state is VerificationState.VERIFIED:
                     counts[2] += connection.execute("UPDATE claims SET status='verified' WHERE subject=? AND predicate=? AND object_value=? AND status='pending'", claim_key).rowcount
+            if subject_suppressed:
+                counts[7] += 1
+                continue
             event_claim = connection.execute("SELECT subject,predicate,object_value FROM claims WHERE claim_id=?", (claim_ids[0],)).fetchone()
             equivalent = connection.execute("""SELECT DISTINCT ec.event_id FROM event_claims ec JOIN claims c ON c.claim_id=ec.claim_id
                 WHERE c.subject=? AND c.predicate=? AND c.object_value=? ORDER BY ec.event_id""", event_claim).fetchall()
-            event_id = None
+            requested_event_id = reason.get("event_id")
+            if requested_event_id is not None and (type(requested_event_id) is not str or not requested_event_id.strip()):
+                raise ValueError("event_id in Phase 3 decision must be a non-empty string")
+            event_id = requested_event_id
             promote_resolution = None
-            if kind == "promote":
+            if event_id is None and kind == "promote":
                 matches = []
                 for observation_id in tuple(reason.get("matched_observation_ids", ())):
                     found = connection.execute("SELECT event_id FROM observations WHERE id=? AND event_id IS NOT NULL", (observation_id,)).fetchall()
@@ -300,6 +417,9 @@ def process_phase4(db_path: str | Path, evaluated_at: str, *, max_items: int = 1
             if kind != "promote" and event_id is None and equivalent: event_id = equivalent[0][0]
             if event_id is None: event_id = stable_id("phase4-event", event_claim[0], event_claim[1], event_claim[2], length=32)
             existed = connection.execute("SELECT 1 FROM events WHERE id=?", (event_id,)).fetchone() is not None
+            if explicit_semantic == "distinct_event" and existed:
+                counts[7] += 1
+                continue
             if not existed:
                 connection.execute("INSERT INTO events(id,run_id,category,started_at,ended_at,article_count,observation_count,status) VALUES (?,?,?,?,?,?,?,?)", (event_id,run_id,source["category"],evaluated_at,None,0,0,"complete"))
                 counts[3] += 1
@@ -318,6 +438,11 @@ def process_phase4(db_path: str | Path, evaluated_at: str, *, max_items: int = 1
             correction_promotion = correction_retraction_kind == "correction"
             latest = connection.execute("SELECT version FROM event_versions WHERE event_id=? ORDER BY version DESC LIMIT 1", (event_id,)).fetchone()
             version = latest[0] + 1 if latest else 1
+            expected_version = reason.get("event_version")
+            if expected_version is not None and (type(expected_version) is not int or expected_version <= 0):
+                raise ValueError("event_version in Phase 3 decision must be a positive int")
+            if expected_version is not None and expected_version != version:
+                raise ValueError(f"event_version {expected_version} is stale; next durable version is {version}")
             placeholders = ",".join("?" for _ in claim_ids)
             has_contradiction = connection.execute(f"SELECT 1 FROM claim_evidence WHERE claim_id IN ({placeholders}) AND evidence_role='contradicts' LIMIT 1", claim_ids).fetchone()
             promote_unresolved = kind == "promote" and promote_resolution != 1

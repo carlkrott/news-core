@@ -30,6 +30,13 @@ All notable changes to the public news-core source are recorded here.
   canonical-source-URL requirements for verified report events.  Public
   workers remain delivery-disabled; this structural change performs no live
   migration or schedule activation.
+- Added Run 5 event-level novelty controls: durable event/version identity,
+  exact URL/title fast prefilters, grounded fact/state delta requirements for
+  material updates, rewrite suppression, subject-scoped briefing seen keys,
+  deterministic primary-subject routing with secondary suppression, and
+  audit preservation of later payloads.  Public workers remain
+  delivery-disabled; this structural change performs no live migration or
+  schedule activation.
 
 ## [0.1.0] - 2026-09-15
 

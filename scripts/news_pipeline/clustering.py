@@ -154,3 +154,27 @@ def cluster_id_for_topic(category, anchor_article_id: str) -> str:
     payload = (category.value + "\x1f" + anchor_article_id).encode("utf-8")
     digest = hashlib.sha256(payload).hexdigest()
     return "topic|" + digest
+
+
+def event_id_for_match(candidate: CandidateArticle, history: HistoryMatch | None = None) -> str:
+    """Return the durable event ID for a candidate/history relationship.
+
+    A persisted event ID is authoritative when history already carries one.
+    Otherwise exact canonical URLs remain the fast stable identity and the
+    topic fallback is deterministic for URL-less history.
+    """
+    persisted = getattr(history, "event_id", None) if history is not None else None
+    if isinstance(persisted, str) and persisted:
+        return persisted
+    if candidate.canonical_url:
+        return cluster_id_for_url(candidate.canonical_url)
+    anchor = history.article_id if history is not None else candidate.candidate_id
+    return cluster_id_for_topic(candidate.category, anchor)
+
+
+def event_version_for_match(history: HistoryMatch | None = None) -> int:
+    """Return the known event version, defaulting to the first version."""
+    version = getattr(history, "event_version", None) if history is not None else None
+    if type(version) is int and version > 0:
+        return version
+    return 1

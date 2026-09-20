@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import timedelta
@@ -184,5 +185,56 @@ class ReportUrlCompletenessTests(unittest.TestCase):
 
                 result = run_report(db_path, Path(artifact_root), _as_of(9))
                 self.assertEqual(result.included_count, 0)
+        finally:
+            os.unlink(db_path)
+
+    def test_replayed_report_link_without_canonical_source_url_is_excluded(self) -> None:
+        conn = _make_db()
+        _insert_event_version(
+            conn,
+            "ev-replay-no-url",
+            1,
+            "Replayed no source URL",
+            "verified",
+            "2026-09-08T08:00:00Z",
+            with_source=False,
+        )
+        conn.execute(
+            "INSERT INTO reports(report_id,window_start,window_end,generation_status,delivery_state,created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (
+                "report-replay-no-url",
+                "2026-09-07T08:00:00Z",
+                "2026-09-08T08:00:00Z",
+                "complete",
+                "dry_run",
+                "2026-09-08T08:01:00Z",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO report_events(report_id,event_id,event_version,section,sort_order,inclusion_reason) "
+            "VALUES (?,?,?,?,?,?)",
+            (
+                "report-replay-no-url",
+                "ev-replay-no-url",
+                1,
+                "headline",
+                0,
+                "verified",
+            ),
+        )
+        conn.commit()
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as handle:
+            db_path = handle.name
+        try:
+            _persist_db(conn, db_path)
+            with tempfile.TemporaryDirectory() as artifact_root:
+                from news_pipeline.report_builder import _items_from_links
+
+                check = sqlite3.connect(db_path)
+                try:
+                    self.assertEqual(_items_from_links(check, "report-replay-no-url"), [])
+                finally:
+                    check.close()
         finally:
             os.unlink(db_path)

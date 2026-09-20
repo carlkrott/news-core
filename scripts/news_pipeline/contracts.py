@@ -176,3 +176,5 @@ class HistoryMatch:
     snippet: str
     canonical_url: str | None
     identity_basis: str
+    event_id: str | None = None
+    event_version: int | None = None
