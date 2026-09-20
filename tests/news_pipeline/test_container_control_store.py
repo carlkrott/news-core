@@ -138,7 +138,7 @@ class EnqueueIdempotencyTests(unittest.TestCase):
             conn.close()
 
     def test_allowed_kinds_are_exactly_the_documented_set(self):
-        self.assertEqual(ALLOWED_KINDS, frozenset({"ingest", "process", "validate", "report"}))
+        self.assertEqual(ALLOWED_KINDS, frozenset({"ingest", "investigate", "process", "validate", "report"}))
 
 
 class ClaimFencingTests(unittest.TestCase):
@@ -244,7 +244,7 @@ class ValidateDiagnosticsTests(unittest.TestCase):
             enqueue(conn, kind="ingest", due_slot_utc="2026-09-14T06:30:00Z")
             self.assertEqual(integrity_check(conn), ["ok"])
             self.assertEqual(foreign_key_check(conn), [])
-            self.assertEqual(schema_version(conn), 1)
+            self.assertEqual(schema_version(conn), 2)
             count, kinds = zero_delivery_check(conn)
             self.assertEqual(count, 0)
             self.assertEqual(kinds, [])

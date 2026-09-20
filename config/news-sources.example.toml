@@ -9,7 +9,9 @@
 # DNS/IP/redirect/private-address checks, and a normalized-port policy.
 #
 # Adapter types and roles are public; query text and category scopes are
-# illustrative and should be reviewed before publication.
+# illustrative and should be reviewed before publication.  Each query is
+# assigned a stable feed_lane_id by the loader; it may be supplied explicitly
+# only when it matches the deterministic source/category/query identity.
 version = 2
 
 [[sources]]

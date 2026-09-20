@@ -36,6 +36,12 @@ services:
       NEWS_BROKER_SEARCH_SOCKET: "${NEWS_CANARY_BROKER_SEARCH_SOCK:-/brokers/search.sock}"
       NEWS_BROKER_FEED_SOCKET: "${NEWS_CANARY_BROKER_FEED_SOCK:-/brokers/feed.sock}"
 
+  investigate:
+    environment:
+      NEWS_CONTAINER_MAX_ITERATIONS: "1"
+      NEWS_BROKER_SEARCH_SOCKET: "${NEWS_CANARY_BROKER_SEARCH_SOCK:-/brokers/search.sock}"
+      NEWS_BROKER_FEED_SOCKET: "${NEWS_CANARY_BROKER_FEED_SOCK:-/brokers/feed.sock}"
+
   process:
     environment:
       NEWS_CONTAINER_MAX_ITERATIONS: "1"

@@ -251,11 +251,11 @@ class ComposeConfigRenderTests(unittest.TestCase):
         except json.JSONDecodeError:
             raise unittest.SkipTest("docker compose did not return JSON")
 
-    def test_render_emits_all_five_roles(self):
+    def test_render_emits_all_six_roles(self):
         services = set(self.model.get("services", {}).keys())
         self.assertEqual(
-            services, {"scheduler", "ingest", "process", "validate", "report"},
-            "compose must define exactly the five hardened roles",
+            services, {"scheduler", "ingest", "investigate", "process", "validate", "report"},
+            "compose must define exactly the six hardened roles",
         )
 
     def test_every_role_is_network_mode_none(self):

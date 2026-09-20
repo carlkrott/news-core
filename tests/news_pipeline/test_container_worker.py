@@ -36,6 +36,7 @@ if str(_SCRIPTS) not in sys.path:
 
 from news_container import ALLOWED_KINDS  # noqa: E402
 from news_container import worker as worker_module  # noqa: E402
+from news_pipeline.investigation import investigation_id  # noqa: E402
 from news_container.control_store import (  # noqa: E402
     ClaimMismatchError,
     ControlStoreError,
@@ -58,6 +59,7 @@ from news_container.worker import (  # noqa: E402
     UnknownKindError,
     WorkerConfig,
     _ingest_argv,
+    _investigate_argv,
     _dispatch,
     _process_argv,
     _report_argv,
@@ -205,6 +207,48 @@ class ArgvBuilderTests(unittest.TestCase):
         ))
         index = argv.index("--provenance")
         self.assertEqual(argv[index + 1], "/canary/provenance.toml")
+
+    def test_investigate_argv_forwards_exact_control_claim_fence(self):
+        argv = _investigate_argv(DispatchContext(
+            db_path=Path("/canary/state.db"),
+            artifact_root=Path("/canary/artifacts"),
+            task_id="task-1",
+            due_slot_utc="2026-09-14T06:30:00Z",
+            payload={
+                "candidate_id": "candidate-1",
+                "feed_lane_id": "lane-1",
+                "query_plan_id": "plan-1",
+                "investigation_id": investigation_id("candidate-1", "lane-1", "plan-1"),
+                "category": "ai",
+                "round_number": 0,
+            },
+            control_db=Path("/canary/control.db"),
+            owner="investigate@worker#1",
+            generation=3,
+        ))
+        self.assertEqual(argv[0], "investigate")
+        self.assertEqual(argv[argv.index("--control-db") + 1], "/canary/control.db")
+        self.assertEqual(argv[argv.index("--control-task-id") + 1], "task-1")
+        self.assertEqual(argv[argv.index("--control-owner") + 1], "investigate@worker#1")
+        self.assertEqual(argv[argv.index("--control-generation") + 1], "3")
+
+    def test_investigate_argv_rejects_unknown_payload_fields(self):
+        with self.assertRaises(ValueError):
+            _investigate_argv(DispatchContext(
+                db_path=Path("/canary/state.db"),
+                artifact_root=Path("/canary/artifacts"),
+                task_id="task-1",
+                due_slot_utc="2026-09-14T06:30:00Z",
+                payload={
+                    "candidate_id": "candidate-1",
+                    "feed_lane_id": "lane-1",
+                    "query_plan_id": "plan-1",
+                    "investigation_id": investigation_id("candidate-1", "lane-1", "plan-1"),
+                    "category": "ai",
+                    "round_number": 0,
+                    "other_candidate_id": "candidate-2",
+                },
+            ))
 
     def test_process_argv_uses_process_subcommand(self):
         ctx = _ctx(
@@ -497,7 +541,7 @@ class WorkerLoopTests(unittest.TestCase):
                 connection.close()
 
     def test_worker_allowed_kinds_match_contract(self):
-        self.assertEqual(ALLOWED_KINDS, frozenset({"ingest", "process", "validate", "report"}))
+        self.assertEqual(ALLOWED_KINDS, frozenset({"ingest", "investigate", "process", "validate", "report"}))
 
 
 def _seed(connection: sqlite3.Connection, kind: str, payload: dict | None = None) -> tuple[str, bool]:

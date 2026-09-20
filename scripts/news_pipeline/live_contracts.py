@@ -257,14 +257,34 @@ def stable_id(*parts: str | None, length: int | None = 32) -> str:
     return digest if length is None else digest[:length]
 
 
+def stable_feed_lane_id(
+    source_id: str,
+    category: str,
+    query_text: str,
+    query_categories: tuple[str, ...] = (),
+) -> str:
+    """Return the deterministic identity of one isolated source query lane."""
+    _text("source_id", source_id)
+    _category("category", category)
+    _text("query_text", query_text)
+    _strings("query_categories", query_categories)
+    return stable_id(
+        "feed-lane", source_id, category, query_text, "\x1f".join(query_categories), length=64
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class QuerySeed:
     text: str
     categories: tuple[str, ...]
+    pipeline_category: str | None = None
+    feed_lane_id: str | None = None
 
     def __post_init__(self) -> None:
         _text("text", self.text)
         _strings("categories", self.categories, nonempty=True)
+        _category("pipeline_category", self.pipeline_category) if self.pipeline_category is not None else None
+        _text("feed_lane_id", self.feed_lane_id, optional=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,7 +314,40 @@ class SourceContract:
         _boolean("enabled", self.enabled)
         if type(self.queries) is not tuple or not self.queries or any(type(query) is not QuerySeed for query in self.queries):
             raise ValueError("queries must be a non-empty tuple of QuerySeed values")
+        if len(self.category_scope) == 1:
+            pipeline_category = self.category_scope[0]
+            normalized_queries = tuple(
+                QuerySeed(
+                    text=query.text,
+                    categories=query.categories,
+                    pipeline_category=query.pipeline_category or pipeline_category,
+                    feed_lane_id=query.feed_lane_id
+                    or stable_feed_lane_id(
+                        self.source_id,
+                        query.pipeline_category or pipeline_category,
+                        query.text,
+                        query.categories,
+                    ),
+                )
+                for query in self.queries
+            )
+            if normalized_queries != self.queries:
+                object.__setattr__(self, "queries", normalized_queries)
         for query in self.queries:
+            if query.pipeline_category is None:
+                raise ValueError("every query seed must name exactly one pipeline category")
+            if query.pipeline_category not in self.category_scope:
+                raise ValueError("query seed pipeline category is outside source scope")
+            if query.feed_lane_id is None:
+                raise ValueError("every query seed must have a stable feed_lane_id")
+            expected_lane_id = stable_feed_lane_id(
+                self.source_id,
+                query.pipeline_category,
+                query.text,
+                query.categories,
+            )
+            if query.feed_lane_id != expected_lane_id:
+                raise ValueError("query seed feed_lane_id does not match its stable identity")
             if not set(query.categories).issubset({"general", "it", "news"}):
                 raise ValueError("query categories contain an unsupported SearXNG category")
         for name in ("title_blocklist", "content_blocklist", "url_blocklist", "allowlist_domains"):
@@ -460,6 +513,7 @@ class QueryPlanContract:
     created_at: str
     topic: str | None = None
     entity: str | None = None
+    feed_lane_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("query_plan_id", "source_id", "query_text", "reason_selected"):
@@ -470,6 +524,14 @@ class QueryPlanContract:
         _timestamp("created_at", self.created_at)
         _text("topic", self.topic, optional=True)
         _text("entity", self.entity, optional=True)
+        if self.feed_lane_id is None:
+            object.__setattr__(
+                self,
+                "feed_lane_id",
+                stable_feed_lane_id(self.source_id, self.category, self.query_text),
+            )
+        else:
+            _text("feed_lane_id", self.feed_lane_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,7 +606,15 @@ class ReportContract:
 
 
 def source_to_row(value: SourceContract) -> dict[str, Any]:
-    query_data = [{"text": query.text, "categories": list(query.categories)} for query in value.queries]
+    query_data = [
+        {
+            "text": query.text,
+            "categories": list(query.categories),
+            "pipeline_category": query.pipeline_category,
+            "feed_lane_id": query.feed_lane_id,
+        }
+        for query in value.queries
+    ]
     return {
         "source_id": value.source_id,
         "adapter_type": value.adapter_type.value,
@@ -569,7 +639,16 @@ def source_from_row(row: Mapping[str, Any]) -> SourceContract:
     _required(row, keys)
     try:
         raw_queries = json.loads(row["queries_json"])
-        queries = tuple(QuerySeed(text=item["text"], categories=tuple(item["categories"])) for item in raw_queries)
+        scope = tuple(json.loads(row["category_scope_json"]))
+        queries = tuple(
+            QuerySeed(
+                text=item["text"],
+                categories=tuple(item["categories"]),
+                pipeline_category=item.get("pipeline_category") or (scope[0] if len(scope) == 1 else None),
+                feed_lane_id=item.get("feed_lane_id"),
+            )
+            for item in raw_queries
+        )
     except (TypeError, KeyError, json.JSONDecodeError) as exc:
         raise ValueError("queries_json is invalid") from exc
     if row["enabled"] not in (0, 1):
@@ -665,8 +744,12 @@ def query_plan_to_row(value: QueryPlanContract) -> dict[str, Any]:
 
 def query_plan_from_row(row: Mapping[str, Any]) -> QueryPlanContract:
     keys = tuple(QueryPlanContract.__dataclass_fields__)
-    _required(row, keys)
-    return QueryPlanContract(**{key: row[key] for key in keys})
+    required = tuple(key for key in keys if key != "feed_lane_id")
+    _required(row, required)
+    return QueryPlanContract(
+        **{key: row[key] for key in required},
+        feed_lane_id=row.get("feed_lane_id"),
+    )
 
 
 def query_attempt_to_row(value: QueryAttemptContract) -> dict[str, Any]:

@@ -83,6 +83,9 @@ class DispatchContext:
     task_id: str
     due_slot_utc: str
     payload: dict[str, Any]
+    control_db: Path | None = None
+    owner: str | None = None
+    generation: int | None = None
 
 
 def _ingest_argv(ctx: DispatchContext) -> list[str]:
@@ -105,6 +108,8 @@ def _ingest_argv(ctx: DispatchContext) -> list[str]:
         if not isinstance(provenance, str) or not provenance:
             raise ValueError("payload field 'provenance' must be a non-empty string")
         argv[argv.index("--run-started-at"):argv.index("--run-started-at")] = ["--provenance", provenance]
+    if ctx.control_db is not None:
+        argv += ["--control-db", str(ctx.control_db)]
     return argv
 
 
@@ -121,6 +126,40 @@ def _process_argv(ctx: DispatchContext) -> list[str]:
         if not isinstance(history_db, str) or not history_db:
             raise ValueError("payload field 'history_db' must be a non-empty string")
         argv += ["--history-db", history_db]
+    return argv
+
+
+def _investigate_argv(ctx: DispatchContext) -> list[str]:
+    from news_pipeline.investigation import validate_investigation_payload
+
+    validate_investigation_payload(ctx.payload)
+    round_number = ctx.payload.get("round_number", 0)
+    if type(round_number) is not int or type(round_number) is bool or not 0 <= round_number < 2:
+        raise ValueError("payload field 'round_number' must be 0 or 1")
+    argv = [
+        "investigate",
+        "--db", str(ctx.db_path),
+        "--candidate-id", _require_payload(ctx, "candidate_id"),
+        "--feed-lane-id", _require_payload(ctx, "feed_lane_id"),
+        "--query-plan-id", _require_payload(ctx, "query_plan_id"),
+        "--investigation-id", _require_payload(ctx, "investigation_id"),
+        "--category", _require_payload(ctx, "category"),
+        "--round-number", str(round_number),
+        "--evaluated-at", ctx.due_slot_utc,
+        "--enable-network",
+    ]
+    fence_values = (ctx.control_db, ctx.owner, ctx.generation)
+    if any(value is not None for value in fence_values) and not all(value is not None for value in fence_values):
+        raise ValueError(
+            "investigate dispatch fence requires control_db, owner, and generation"
+        )
+    if all(value is not None for value in fence_values):
+        argv += [
+            "--control-db", str(ctx.control_db),
+            "--control-task-id", ctx.task_id,
+            "--control-owner", str(ctx.owner),
+            "--control-generation", str(ctx.generation),
+        ]
     return argv
 
 
@@ -159,6 +198,7 @@ def _require_payload(ctx: DispatchContext, key: str) -> str:
 
 _KIND_ARGV_BUILDERS.update({
     "ingest": _ingest_argv,
+    "investigate": _investigate_argv,
     "process": _process_argv,
     "report": _report_argv,
     "validate": _validate_argv,
@@ -851,6 +891,9 @@ def run_worker(
                             task_id=task_id,
                             due_slot_utc=due_slot_utc,
                             payload=payload,
+                            control_db=config.control_db,
+                            owner=invocation_owner,
+                            generation=generation,
                         )
                         argv = argv_builder(ctx)
                         if dispatch is not None:

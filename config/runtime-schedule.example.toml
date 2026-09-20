@@ -7,8 +7,10 @@
 # the same (kind, due_slot) is a no-op, which is why the schedule can
 # be re-applied on every container restart.
 #
-# Allowed ``kind`` values are exactly: ``ingest``, ``process``,
-# ``validate``, ``report``.  ``delivery`` is refused at every layer.
+# Allowed ``kind`` values are exactly: ``ingest``, ``investigate``,
+# ``process``, ``validate``, ``report``.  ``investigate`` jobs are normally
+# created per candidate by ingest rather than scheduled as a mixed batch.
+# ``delivery`` is refused at every layer.
 #
 # Notes:
 # * The validate sweep runs after the delivery-disabled shadow report so a
