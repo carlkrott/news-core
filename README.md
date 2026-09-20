@@ -98,6 +98,26 @@ credentials, and the private delivery adapter remain outside this repository.
 No schema migration or delivery activation occurs merely by building or
 running the public source.
 
+## Quality audit and disposable rehearsal
+
+`python -m news_pipeline.quality_audit --db PATH [--receipts PATH]` opens an
+existing schema-v9 SQLite database in read-only/query-only mode and emits
+deterministic count-only JSON.  Receipt-only metrics are reported as
+unavailable rather than inferred when `--receipts` is omitted.  The report does
+not emit article bodies, URLs, prompts, generated copy, paths, recipients, or
+delivery identifiers.  `absent_database_persistence` separately names metrics
+that require typed receipts even when a receipt was supplied.
+
+`python -m news_pipeline.synthetic_rehearsal --work-root NEW_DIR
+--as-of-utc 2026-09-20T12:00:00Z` creates a disposable synthetic database and
+artifact tree.  It exercises discovery receipts, freshness QC, investigation,
+provenance, verification, eventing, per-subject editorial QC, replay, one
+material update, and prepared subject outboxes.  Its transports are injected
+in-process fixtures: it performs no external network, model, delivery, schema
+migration against live state, schedule change, or service operation.  The
+target directory must be empty, and every delivery-attempt count must remain
+zero.
+
 ## Quick start (portable, no live delivery)
 
 ```bash
