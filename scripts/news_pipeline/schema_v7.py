@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Iterable, Sequence
 
 from .delivery_schema_v6 import validate_v6
+from .live_contracts import SourceRole
 from .provenance import PublisherRegistry, PublisherRule
 
 SCHEMA_VERSION = 7
@@ -159,14 +160,14 @@ def backfill_source_item_provenance(
         raise ValueError("source_item_ids must not contain duplicates")
     if requested is None:
         rows = connection.execute(
-            "SELECT source_item_id,canonical_url,category FROM source_items ORDER BY source_item_id"
+            "SELECT source_item_id,canonical_url,category,publisher FROM source_items ORDER BY source_item_id"
         ).fetchall()
     elif not requested:
         return 0
     else:
         placeholders = ",".join("?" for _ in requested)
         rows = connection.execute(
-            f"SELECT source_item_id,canonical_url,category FROM source_items WHERE source_item_id IN ({placeholders}) ORDER BY source_item_id",
+            f"SELECT source_item_id,canonical_url,category,publisher FROM source_items WHERE source_item_id IN ({placeholders}) ORDER BY source_item_id",
             requested,
         ).fetchall()
         found = {row[0] for row in rows}
@@ -174,8 +175,13 @@ def backfill_source_item_provenance(
         if missing:
             raise ValueError(f"source items not found: {missing}")
     classified = 0
-    for source_item_id, canonical_url, category in rows:
-        result = registry.classify(canonical_url, category=category, classified_at=classified_at)
+    for source_item_id, canonical_url, category, publisher in rows:
+        result = registry.classify(
+            canonical_url,
+            category=category,
+            classified_at=classified_at,
+            claim_subject=publisher,
+        )
         connection.execute(
             """INSERT INTO source_item_provenance(
                    source_item_id,normalized_publisher_host,effective_source_role,
@@ -203,6 +209,37 @@ def backfill_source_item_provenance(
         )
         classified += 1
     return classified
+
+
+def registry_from_connection(connection: sqlite3.Connection) -> PublisherRegistry:
+    """Rebuild the reviewed registry stored in schema-v7 tables."""
+    _validate_v7(connection)
+    rules: list[PublisherRule] = []
+    for row in connection.execute(
+        """SELECT rule_id,normalized_host,effective_source_role,independence_group,
+                  category_scope_json,authority_entities_json,enabled,audit_note
+             FROM publisher_registry ORDER BY rule_id"""
+    ):
+        try:
+            categories = json.loads(row[4])
+            authority_entities = json.loads(row[5])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("publisher registry JSON is invalid") from exc
+        if not isinstance(categories, list) or not isinstance(authority_entities, list):
+            raise ValueError("publisher registry JSON values must be lists")
+        rules.append(
+            PublisherRule(
+                rule_id=row[0],
+                host=row[1],
+                source_role=SourceRole(row[2]),
+                independence_group=row[3],
+                categories=tuple(categories),
+                authority_entities=tuple(authority_entities),
+                enabled=bool(row[6]),
+                audit_note=row[7],
+            )
+        )
+    return PublisherRegistry(tuple(rules))
 
 
 def migrate_v7(
@@ -267,5 +304,6 @@ __all__ = [
     "apply_v7",
     "backfill_source_item_provenance",
     "migrate_v7",
+    "registry_from_connection",
     "validate_v7",
 ]
