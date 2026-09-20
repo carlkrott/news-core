@@ -378,6 +378,27 @@ class PublicationSafetySyntheticNegatives(unittest.TestCase):
             code="CREDENTIAL_PATTERN",
         )
 
+    def test_rejects_synthetic_telegram_token_and_recipient(self) -> None:
+        synthetic_token = "123456" + ":" + ("A" * 24)
+        synthetic_chat_id = "123" + "456789"
+        for label, assignment in (
+            ("token", f'telegram_bot_token = "{synthetic_token}"\n'),
+            ("recipient", f'chat_id = "{synthetic_chat_id}"\n'),
+        ):
+            with self.subTest(label=label):
+                self._expect_code(
+                    {
+                        "config/news-sources.example.toml": (
+                            "# Public-export example source registry.\n"
+                            "[sources]\n"
+                            'source_id = "synthetic"\n'
+                            'host = "example.com"\n'
+                            + assignment
+                        ),
+                    },
+                    code="CREDENTIAL_PATTERN",
+                )
+
     def test_rejects_forbidden_suffix(self) -> None:
         self._expect_code(
             {

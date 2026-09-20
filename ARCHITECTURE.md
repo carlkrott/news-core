@@ -119,10 +119,30 @@ directory, or a host identity path.
   is recorded and retried without concurrent writes.
 * Scheduler / worker outputs are bounded, sanitized JSON; output
   bodies are hashed, not persisted verbatim.
-* `delivery` and `--enable-live-delivery` are absent from the queue
-  vocabulary at every layer (policy, scheduler, worker, broker).
+* The operator-only `delivery` kind is absent from the public scheduler,
+  control-store, worker, and broker vocabulary.  The standalone
+  `daily-deliver` command is not scheduled by the public runtime.
 * The canary schedule and config are isolated and cannot point to
   production state paths.
+
+### Subject delivery outbox
+
+Schema v9 extends the existing schema-v8 database without modifying the legacy
+combined-report v3/v6 tables.  `subject_reports` identifies one immutable
+content revision for one parent report and one subject.
+`subject_delivery_outbox` records prepared, sent, failed, ambiguous, or skipped
+state, while `subject_delivery_attempts` preserves each exact attempt.
+
+The generation-side boundary may create a prepared outbox row but performs no
+external I/O.  A private operator adapter binds the channel and recipient,
+persists an attempt before sending, and then records the terminal outcome.
+Already-sent revisions are replay-safe; ambiguous or unresolved prepared
+attempts block automatic retry; zero-story reports are skipped without an
+attempt.  Exact private schedules, recipient bindings, credentials, message
+identifiers, and generated report content are not part of the public export.
+There is deliberately no automatic or public ambiguous-resolution action; an
+operator must reconcile the downstream outcome before any later, separately
+authorized resolution can change that durable state.
 
 ### Publisher provenance and verification identity
 

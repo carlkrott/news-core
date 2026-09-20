@@ -183,11 +183,11 @@ def test_ingest_schema_gate_accepts_v5_v6_and_rejects_unknown(tmp_path: Path) ->
     try:
         connection.execute(
             "INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)",
-            (7, "2026-09-08T08:02:00Z"),
+            (10, "2026-09-08T08:02:00Z"),
         )
     finally:
         connection.close()
-    with pytest.raises(ValueError, match="known additive v4-v6 prefix"):
+    with pytest.raises(ValueError, match="known additive v4-v9 prefix"):
         _verify_schema(db)
 
 
@@ -320,7 +320,7 @@ def test_wrappers_resolve_workspace_code_when_installed_in_local_bin(tmp_path: P
         source = root / "bin" / wrapper
         body = source.read_text(encoding="utf-8")
         assert "BASH_SOURCE" not in body
-        assert 'NEWS_PIPELINE_CODE_ROOT:-$HOME/.zeroclaw/workspace' in body
+        assert 'NEWS_PIPELINE_CODE_ROOT:-/app' in body
         installed = local_bin / wrapper
         installed.write_bytes(source.read_bytes())
         installed.chmod(0o700)
@@ -330,7 +330,11 @@ def test_wrappers_resolve_workspace_code_when_installed_in_local_bin(tmp_path: P
         for key, value in os.environ.items()
         if key not in {"PYTHONPATH", "NEWS_PIPELINE_CODE_ROOT"}
     }
-    env.update(HOME=str(home), NEWS_PIPELINE_DB=str(tmp_path / "missing.db"))
+    env.update(
+        HOME=str(home),
+        NEWS_PIPELINE_CODE_ROOT=str(workspace),
+        NEWS_PIPELINE_DB=str(tmp_path / "missing.db"),
+    )
     for wrapper in ("news-tick", "news-process"):
         result = subprocess.run(
             [str(local_bin / wrapper)], capture_output=True, text=True, env=env, check=False
@@ -371,12 +375,12 @@ def test_daily_report_without_prior_replays_current_window(tmp_path: Path) -> No
     payload = json.loads(result.stdout)
     assert payload["report_id"] == report_id
     assert payload["was_replayed"] is True
-    assert payload["delivery_state"] == "dry_run"
+    assert payload["delivery_state"] == "not_attempted"
     assert payload["network_used"] is False
     connection = sqlite3.connect(db)
     try:
         assert connection.execute("SELECT COUNT(*) FROM reports").fetchone()[0] == 1
-        assert connection.execute("SELECT COUNT(*) FROM report_deliveries").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM report_deliveries").fetchone()[0] == 0
     finally:
         connection.close()
 
@@ -413,7 +417,7 @@ def test_daily_report_without_prior_advances_from_latest_completed_window(
     payload = json.loads(result.stdout)
     assert payload["report_id"] != first_report_id
     assert payload["was_replayed"] is False
-    assert payload["delivery_state"] == "dry_run"
+    assert payload["delivery_state"] == "not_attempted"
     assert payload["network_used"] is False
     connection = sqlite3.connect(db)
     try:
@@ -424,7 +428,7 @@ def test_daily_report_without_prior_advances_from_latest_completed_window(
             ("2026-09-01T07:00:00Z", "2026-09-08T07:00:00Z"),
             ("2026-09-08T07:00:00Z", "2026-09-09T07:00:00Z"),
         ]
-        assert connection.execute("SELECT COUNT(*) FROM report_deliveries").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM report_deliveries").fetchone()[0] == 0
     finally:
         connection.close()
 

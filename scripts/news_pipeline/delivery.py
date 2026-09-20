@@ -1,9 +1,12 @@
-"""Fail-closed Phase 6 Telegram delivery with durable idempotency receipts.
+"""Fail-closed legacy combined-report delivery with v6 receipts.
 
 The adapter is deliberately test-injectable.  Network delivery is impossible
 unless the caller supplies ``enable_live=True``; the normal job wrappers never
 do that.  A prepared or ambiguous attempt is a hard stop on replay because
 Telegram has no portable idempotency key for ``sendMessage``.
+
+Run 8 subject-scoped revisions use the DB-only ``subject_delivery`` contract;
+this module remains the compatibility path for legacy combined reports.
 """
 from __future__ import annotations
 

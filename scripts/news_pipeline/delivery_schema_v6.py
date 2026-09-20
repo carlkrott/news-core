@@ -1,8 +1,10 @@
-"""Schema v6 for durable report-delivery receipts.
+"""Schema v6 for durable legacy combined-report delivery receipts.
 
 This migration is intentionally separate from Phase 5.  It is never applied
 implicitly by a delivery job; the caller must perform the gated v6 migration
 as an explicit production operation after the Phase 5 shadow gate.
+Run 8 subject-scoped outbox tables are additive schema-v9 state and do not
+retroactively alter this published migration.
 """
 from __future__ import annotations
 

@@ -59,10 +59,15 @@ def _parser() -> argparse.ArgumentParser:
         report.add_argument("--artifact-root", required=True)
         report.add_argument("--as-of-utc", required=True)
         report.add_argument("--prior-upper-utc")
-        report.add_argument("--config")
-        report.add_argument("--telegram-api-base", default="https://api.telegram.org")
-        report.add_argument("--enable-live-delivery", action="store_true")
-        report.add_argument("--retry-failed", action="store_true")
+
+    delivery = sub.add_parser("daily-deliver")
+    _add_common_db(delivery)
+    delivery.add_argument("--artifact-root", required=True)
+    delivery.add_argument("--report-id", required=True)
+    delivery.add_argument("--config")
+    delivery.add_argument("--telegram-api-base", default="https://api.telegram.org")
+    delivery.add_argument("--enable-live-delivery", action="store_true")
+    delivery.add_argument("--retry-failed", action="store_true")
 
     health = sub.add_parser("health")
     health.add_argument("--db", required=True)
@@ -317,21 +322,11 @@ def _resolve_report_prior(
 def _run_daily_report(args: argparse.Namespace) -> int:
     try:
         as_of, prior = _report_args(args)
-        if args.job == "daily-close" and args.enable_live_delivery:
-            raise ValueError("daily-close cannot enable live delivery; use daily-report")
         if not Path(args.db).is_file() or not Path(args.artifact_root).is_dir():
             raise ValueError("--db must be a file and --artifact-root must be a directory")
         prior = _resolve_report_prior(args.db, as_of, prior)
         from .report_builder import run_report
         result = run_report(Path(args.db), Path(args.artifact_root), as_of, last_completed_upper_utc=prior)
-        from .delivery import deliver_report
-        delivery = deliver_report(
-            args.db, args.artifact_root, result.report_id,
-            enable_live=args.enable_live_delivery,
-            config_path=args.config,
-            api_base=args.telegram_api_base,
-            retry_failed=args.retry_failed,
-        )
     except Exception as exc:
         _json({"error": {"type": "runtime", "message": str(exc)}})
         return 1
@@ -341,6 +336,38 @@ def _run_daily_report(args: argparse.Namespace) -> int:
         "report_id": result.report_id,
         "generation_status": result.generation_status,
         "was_replayed": result.was_replayed,
+        "delivery_state": "not_attempted",
+        "network_used": False,
+        "replayed": False,
+        "message_count": 0,
+    })
+    return 0
+
+
+def _run_daily_deliver(args: argparse.Namespace) -> int:
+    """Consume one existing report; never run report/model generation."""
+    try:
+        if not Path(args.db).is_file() or not Path(args.artifact_root).is_dir():
+            raise ValueError("--db must be a file and --artifact-root must be a directory")
+        if type(args.report_id) is not str or not args.report_id.strip():
+            raise ValueError("--report-id must be non-empty")
+        from .delivery import deliver_report
+        delivery = deliver_report(
+            args.db,
+            args.artifact_root,
+            args.report_id,
+            enable_live=args.enable_live_delivery,
+            config_path=args.config,
+            api_base=args.telegram_api_base,
+            retry_failed=args.retry_failed,
+        )
+    except Exception as exc:
+        _json({"error": {"type": "runtime", "message": str(exc)}})
+        return 1
+    _json({
+        "job": "daily-deliver",
+        "state": "completed",
+        "report_id": delivery.report_id,
         "delivery_state": delivery.state,
         "network_used": delivery.network_used,
         "replayed": delivery.replayed,
@@ -359,6 +386,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_investigate(args)
     if args.job in {"daily-close", "daily-report"}:
         return _run_daily_report(args)
+    if args.job == "daily-deliver":
+        return _run_daily_deliver(args)
     if args.job == "health":
         from .news_health import health_snapshot
         _json(health_snapshot(args.db))

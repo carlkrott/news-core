@@ -7,12 +7,4 @@ ARTIFACT_ROOT=${NEWS_PIPELINE_ARTIFACT_ROOT:-/artifacts}
 AS_OF=${NEWS_PIPELINE_AS_OF_UTC:-$(/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ)}
 ARGS=(--db "$DB" --artifact-root "$ARTIFACT_ROOT" --as-of-utc "$AS_OF")
 [[ -n "${NEWS_PIPELINE_PRIOR_UPPER_UTC:-}" ]] && ARGS+=(--prior-upper-utc "$NEWS_PIPELINE_PRIOR_UPPER_UTC")
-[[ -n "${ZEROCLAW_CONFIG:-}" ]] && ARGS+=(--config "$ZEROCLAW_CONFIG")
-[[ -n "${NEWS_BRIEFING_TELEGRAM_API_BASE:-}" ]] && ARGS+=(--telegram-api-base "$NEWS_BRIEFING_TELEGRAM_API_BASE")
-if [[ "${NEWS_PHASE6_ENABLE_LIVE_DELIVERY:-0}" == "1" ]]; then
-  ARGS+=(--enable-live-delivery)
-fi
-if [[ "${NEWS_PHASE6_RETRY_FAILED:-0}" == "1" ]]; then
-  ARGS+=(--retry-failed)
-fi
 exec /usr/bin/python3 -m news_pipeline.jobs daily-report "${ARGS[@]}"
