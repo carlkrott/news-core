@@ -18,13 +18,15 @@ from .live_contracts import (
     SourceAdapter,
     SourceContract,
     SourceRole,
+    stable_feed_lane_id,
 )
 from .models import Subject, subject_for_category
 
 _SOURCE_TOP_KEYS = frozenset({"version", "sources"})
 _SOURCE_REQUIRED = frozenset({"source_id", "adapter_type", "source_role", "host", "category_scope", "enabled", "queries"})
 _SOURCE_OPTIONAL = frozenset({"title_blocklist", "content_blocklist", "url_blocklist", "allowlist_domains", "cadence_minutes", "terms_notes", "rate_limit_notes", "next_due_at"})
-_QUERY_KEYS = frozenset({"text", "categories"})
+_QUERY_REQUIRED = frozenset({"text", "categories"})
+_QUERY_OPTIONAL = frozenset({"pipeline_category", "feed_lane_id"})
 _TOPIC_TOP_KEYS = frozenset({"version", "topics"})
 _TOPIC_KEYS = frozenset({"category", "subject", "label", "included_in_subject_report", "consequential_only"})
 _POLICY_TOP_KEYS = frozenset({"version", "pipeline", "report", "subjects", "deferred"})
@@ -255,6 +257,7 @@ def _parse_sources(raw: Mapping[str, Any]) -> tuple[SourceContract, ...]:
         if type(entry) is not dict:
             raise ValueError(f"sources[{index}] must be a table")
         _exact_keys(f"sources[{index}]", entry, required=_SOURCE_REQUIRED, optional=_SOURCE_OPTIONAL)
+        category_scope = _string_tuple("category_scope", entry["category_scope"], nonempty=True)
         raw_queries = entry["queries"]
         if type(raw_queries) is not list or not raw_queries:
             raise ValueError(f"sources[{index}].queries must be a non-empty array of tables")
@@ -262,8 +265,35 @@ def _parse_sources(raw: Mapping[str, Any]) -> tuple[SourceContract, ...]:
         for query_index, query in enumerate(raw_queries):
             if type(query) is not dict:
                 raise ValueError(f"sources[{index}].queries[{query_index}] must be a table")
-            _exact_keys(f"sources[{index}].queries[{query_index}]", query, required=_QUERY_KEYS)
-            queries.append(QuerySeed(text=query["text"], categories=_string_tuple("query categories", query["categories"], nonempty=True)))
+            _exact_keys(
+                f"sources[{index}].queries[{query_index}]",
+                query,
+                required=_QUERY_REQUIRED,
+                optional=_QUERY_OPTIONAL,
+            )
+            pipeline_category = query.get("pipeline_category")
+            if pipeline_category is None and len(category_scope) == 1:
+                pipeline_category = category_scope[0]
+            lane_id = query.get("feed_lane_id")
+            seed = QuerySeed(
+                text=query["text"],
+                categories=_string_tuple("query categories", query["categories"], nonempty=True),
+                pipeline_category=pipeline_category,
+                feed_lane_id=lane_id,
+            )
+            if lane_id is not None:
+                assert seed.pipeline_category is not None
+                expected_lane_id = stable_feed_lane_id(
+                    entry["source_id"],
+                    seed.pipeline_category,
+                    seed.text,
+                    seed.categories,
+                )
+                if lane_id != expected_lane_id:
+                    raise ValueError(
+                        f"sources[{index}].queries[{query_index}].feed_lane_id does not match its stable identity"
+                    )
+            queries.append(seed)
         try:
             adapter = SourceAdapter(entry["adapter_type"])
             role = SourceRole(entry["source_role"])
@@ -274,7 +304,7 @@ def _parse_sources(raw: Mapping[str, Any]) -> tuple[SourceContract, ...]:
             raise ValueError("direct Reddit sources are disabled")
         result.append(SourceContract(
             source_id=entry["source_id"], adapter_type=adapter, source_role=role, host=host,
-            category_scope=_string_tuple("category_scope", entry["category_scope"], nonempty=True),
+            category_scope=category_scope,
             enabled=entry["enabled"], queries=tuple(queries),
             title_blocklist=_string_tuple("title_blocklist", entry.get("title_blocklist", [])),
             content_blocklist=_string_tuple("content_blocklist", entry.get("content_blocklist", [])),

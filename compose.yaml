@@ -26,7 +26,7 @@ x-canary-volume: &canary-volume
   bind:
     create_host_path: false
 
-# Worker environment shared across ingest/process/validate/report.
+# Worker environment shared across ingest/investigate/process/validate/report.
 #
 # These five variables are REQUIRED by bin/container-entrypoint and
 # must exist in every worker Compose environment:
@@ -89,6 +89,25 @@ services:
         bind:
           create_host_path: false
     command: [worker, ingest]
+
+  investigate:
+    <<: *hardening
+    image: ${NEWS_CONTAINER_IMAGE:-news-pipeline-container:local}
+    environment:
+      <<: *worker-environment
+      NEWS_CONTAINER_ROLE: investigate
+      NEWS_CONTAINER_OWNER: investigate
+      NEWS_BROKER_SEARCH_SOCKET: /brokers/search.sock
+      NEWS_BROKER_FEED_SOCKET: /brokers/feed.sock
+    volumes:
+      - *canary-volume
+      - type: bind
+        source: ${NEWS_BROKER_SOCKET_DIR:?set NEWS_BROKER_SOCKET_DIR}
+        target: /brokers
+        read_only: true
+        bind:
+          create_host_path: false
+    command: [worker, investigate]
 
   process:
     <<: *hardening

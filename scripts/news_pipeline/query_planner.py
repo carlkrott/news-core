@@ -8,6 +8,7 @@ from .live_contracts import QueryPlanContract, stable_id
 MAX_EXPANSION_ROUNDS = 2
 MAX_QUERY_LENGTH = 256
 EXPANSION_REASON = "low_novelty_expansion"
+INVESTIGATION_REASON = "event_specific_investigation"
 
 _STOP_WORDS = frozenset(
     {
@@ -69,7 +70,7 @@ def validate_searxng_query_target(target: str) -> str:
 def validate_query_plan(plan: QueryPlanContract, *, target: str | None = None) -> QueryPlanContract:
     if type(plan) is not QueryPlanContract:
         raise TypeError("plan must be QueryPlanContract")
-    if plan.reason_selected != EXPANSION_REASON:
+    if plan.reason_selected not in {EXPANSION_REASON, INVESTIGATION_REASON}:
         raise ValueError("unexpected expansion reason")
     if plan.max_rounds != MAX_EXPANSION_ROUNDS:
         raise ValueError("expansion plans must be capped at two rounds")
@@ -148,3 +149,56 @@ def plan_expansion(
         target=target,
         cooldown_seconds=cooldown_seconds,
     )
+
+
+def build_investigation_queries(
+    *,
+    candidate_id: str,
+    feed_lane_id: str,
+    category: str,
+    title: str,
+    publisher_host: str | None,
+    evaluated_at: str,
+    round_number: int = 0,
+) -> tuple[QueryPlanContract, ...]:
+    """Build bounded, event-specific plans without combining candidates.
+
+    The input is one candidate only.  The returned plans retain the
+    candidate's feed lane so callers can persist and audit the isolation
+    boundary without sharing a result list with discovery.
+    """
+    if type(candidate_id) is not str or not candidate_id.strip():
+        raise ValueError("candidate_id must be a non-empty string")
+    if type(feed_lane_id) is not str or not feed_lane_id.strip():
+        raise ValueError("feed_lane_id must be a non-empty string")
+    if round_number < 0 or round_number >= MAX_EXPANSION_ROUNDS:
+        raise ValueError("investigation round_number must be between 0 and 1")
+    seeds = [title]
+    if publisher_host:
+        host_terms = publisher_host.replace(".", " ").replace("-", " ")
+        seeds.append(f"{title} {host_terms}")
+    query_texts = tuple(dict.fromkeys(_query_text(seed) for seed in seeds))[:MAX_EXPANSION_ROUNDS]
+    plans = tuple(
+        QueryPlanContract(
+            query_plan_id=stable_id(
+                "investigation-query", candidate_id, feed_lane_id, str(round_number), query_text
+            ),
+            source_id=feed_lane_id,
+            query_text=query_text,
+            category=category,
+            reason_selected=INVESTIGATION_REASON,
+            cooldown_seconds=0,
+            max_rounds=MAX_EXPANSION_ROUNDS,
+            created_at=evaluated_at,
+            entity=candidate_id,
+            feed_lane_id=feed_lane_id,
+        )
+        for query_text in query_texts
+    )
+    return tuple(validate_query_plan(plan) for plan in plans)
+
+
+def plan_investigation(
+    **kwargs: object,
+) -> tuple[QueryPlanContract, ...]:
+    return build_investigation_queries(**kwargs)  # type: ignore[arg-type]

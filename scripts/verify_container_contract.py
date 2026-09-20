@@ -50,7 +50,7 @@ EXPECTED_PYTHON_BASE_DIGEST = (
 
 EXPECTED_BASE_LABEL = "docker.io/library/python:3.11-slim"
 
-ALLOWED_ROLES = ("scheduler", "ingest", "process", "validate", "report")
+ALLOWED_ROLES = ("scheduler", "ingest", "investigate", "process", "validate", "report")
 
 # Env keys that indicate the deliverable slice is misconfigured.  These
 # are not legitimate deployment values for the canary image; presence
@@ -67,6 +67,7 @@ DELIVERY_ENV_FORBIDDEN: frozenset[str] = frozenset({
 REQUIRED_ENV: dict[str, frozenset[str]] = {
     "scheduler": frozenset({"NEWS_CONTAINER_MODE", "NEWS_CONTAINER_ROLE"}),
     "ingest":    frozenset({"NEWS_CONTAINER_MODE", "NEWS_CONTAINER_ROLE"}),
+    "investigate": frozenset({"NEWS_CONTAINER_MODE", "NEWS_CONTAINER_ROLE"}),
     "process":   frozenset({"NEWS_CONTAINER_MODE", "NEWS_CONTAINER_ROLE"}),
     "validate":  frozenset({"NEWS_CONTAINER_MODE", "NEWS_CONTAINER_ROLE"}),
     "report":    frozenset({"NEWS_CONTAINER_MODE", "NEWS_CONTAINER_ROLE"}),

@@ -120,6 +120,15 @@ jobs:
           python3 -m unittest discover -s tests/news_pipeline \
             -p test_subject_contracts.py -v
 
+      - name: focused Run 3 lane and investigation tests
+        run: |
+          python3 -m unittest discover -s tests/news_pipeline \
+            -p test_run3_feed_lanes.py -v
+          python3 -m unittest discover -s tests/news_pipeline \
+            -p test_container_control_store.py -v
+          python3 -m unittest discover -s tests/news_pipeline \
+            -p test_container_worker.py -v
+
   image-smoke:
     name: build and inspect disposable image
     runs-on: ubuntu-latest

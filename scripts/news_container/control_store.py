@@ -33,7 +33,7 @@ from typing import Any, Iterable, Iterator
 
 from . import ALLOWED_KINDS, DELIVERY_KIND_FORBIDDEN
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
     version INTEGER PRIMARY KEY,
@@ -44,11 +44,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     task_id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
     due_slot_utc TEXT NOT NULL,
+    job_key TEXT NOT NULL DEFAULT '',
     payload_json TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('pending','claimed','completed','failed')),
     generation INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    UNIQUE (kind, due_slot_utc)
+    UNIQUE (kind, due_slot_utc, job_key)
 );
 
 CREATE TABLE IF NOT EXISTS claims (
@@ -142,10 +143,102 @@ def _bootstrap_schema(connection: sqlite3.Connection) -> None:
             (SCHEMA_VERSION, _utc_now_iso()),
         )
         return
+    if row["version"] == 1:
+        _upgrade_v1_to_v2(connection)
+        return
     if row["version"] > SCHEMA_VERSION:
         raise ControlStoreError(
             f"control DB schema version {row['version']} is newer than supported {SCHEMA_VERSION}"
         )
+
+
+def _upgrade_v1_to_v2(connection: sqlite3.Connection) -> None:
+    """Rebuild the small control store so investigations can share a due slot."""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
+    if "job_key" in columns:
+        connection.execute(
+            "INSERT OR IGNORE INTO schema_meta(version, created_at) VALUES (?, ?)",
+            (SCHEMA_VERSION, _utc_now_iso()),
+        )
+        return
+    connection.execute("PRAGMA foreign_keys=OFF")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DROP INDEX IF EXISTS claims_expiry_idx")
+        connection.execute("DROP INDEX IF EXISTS runs_task_idx")
+        connection.execute("ALTER TABLE claims RENAME TO claims_v1")
+        connection.execute("ALTER TABLE runs RENAME TO runs_v1")
+        connection.execute("ALTER TABLE tasks RENAME TO tasks_v1")
+        connection.execute(
+            """CREATE TABLE tasks(
+                task_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                due_slot_utc TEXT NOT NULL,
+                job_key TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('pending','claimed','completed','failed')),
+                generation INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                UNIQUE (kind, due_slot_utc, job_key)
+            )"""
+        )
+        connection.execute(
+            """CREATE TABLE claims(
+                task_id TEXT PRIMARY KEY,
+                owner TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                attempt INTEGER NOT NULL DEFAULT 1,
+                expires_at_utc TEXT NOT NULL,
+                claimed_at_utc TEXT NOT NULL,
+                FOREIGN KEY (task_id) REFERENCES tasks(task_id)
+            )"""
+        )
+        connection.execute(
+            """CREATE TABLE runs(
+                run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                owner TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                started_at_utc TEXT NOT NULL,
+                finished_at_utc TEXT,
+                status TEXT NOT NULL CHECK (status IN ('completed','failed')),
+                exit_code INTEGER,
+                stdout_hash TEXT,
+                error_class TEXT,
+                error_message TEXT,
+                canary_root TEXT,
+                FOREIGN KEY (task_id) REFERENCES tasks(task_id)
+            )"""
+        )
+        connection.execute(
+            """INSERT INTO tasks(task_id,kind,due_slot_utc,job_key,payload_json,state,generation,created_at)
+               SELECT task_id,kind,due_slot_utc,'',payload_json,state,generation,created_at FROM tasks_v1"""
+        )
+        connection.execute(
+            """INSERT INTO claims(task_id,owner,generation,attempt,expires_at_utc,claimed_at_utc)
+               SELECT task_id,owner,generation,attempt,expires_at_utc,claimed_at_utc FROM claims_v1"""
+        )
+        connection.execute(
+            """INSERT INTO runs(run_id,task_id,owner,generation,started_at_utc,finished_at_utc,status,
+                                 exit_code,stdout_hash,error_class,error_message,canary_root)
+               SELECT run_id,task_id,owner,generation,started_at_utc,finished_at_utc,status,
+                      exit_code,stdout_hash,error_class,error_message,canary_root FROM runs_v1"""
+        )
+        connection.execute("DROP TABLE claims_v1")
+        connection.execute("DROP TABLE runs_v1")
+        connection.execute("DROP TABLE tasks_v1")
+        connection.execute("CREATE INDEX claims_expiry_idx ON claims (expires_at_utc)")
+        connection.execute("CREATE INDEX runs_task_idx ON runs (task_id)")
+        connection.execute(
+            "INSERT INTO schema_meta(version, created_at) VALUES (?, ?)",
+            (SCHEMA_VERSION, _utc_now_iso()),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.execute("PRAGMA foreign_keys=ON")
 
 
 def _utc_now_iso(now: datetime | None = None) -> str:
@@ -219,15 +312,20 @@ def _scrub_delivery(value: Any, *, context: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def deterministic_task_id(kind: str, due_slot_utc: str) -> str:
-    """Return a stable 16-char task id from ``kind`` and UTC due slot.
-
-    The same ``kind`` + due slot always yields the same id, which is
-    what makes the ``UNIQUE (kind, due_slot_utc)`` enqueue idempotent.
-    """
+def deterministic_task_id(
+    kind: str,
+    due_slot_utc: str,
+    *,
+    job_key: str | None = None,
+) -> str:
+    """Return a stable task id from kind, due slot, and optional job key."""
     validate_kind(kind)
     _validate_due_slot(due_slot_utc)
-    material = f"{kind}|{due_slot_utc}".encode("utf-8")
+    if job_key is not None and (type(job_key) is not str or not job_key.strip()):
+        raise ValueError("job_key must be a non-empty string when supplied")
+    material = (
+        f"{kind}|{due_slot_utc}" if not job_key else f"{kind}|{due_slot_utc}|{job_key}"
+    ).encode("utf-8")
     return hashlib.sha256(material).hexdigest()[:16]
 
 
@@ -279,7 +377,13 @@ def enqueue(
     validate_kind(kind)
     _validate_due_slot(due_slot_utc)
     payload = validate_payload(dict(payload or {}))
-    task_id = deterministic_task_id(kind, due_slot_utc)
+    job_key = ""
+    if kind == "investigate":
+        from news_pipeline.investigation import validate_investigation_payload
+
+        validate_investigation_payload(payload)
+        job_key = str(payload["investigation_id"])
+    task_id = deterministic_task_id(kind, due_slot_utc, job_key=job_key or None)
     payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     ts = _utc_now_iso(now)
 
@@ -295,9 +399,9 @@ def enqueue(
                 )
             return task_id, False
         connection.execute(
-            "INSERT INTO tasks(task_id, kind, due_slot_utc, payload_json, state, generation, created_at)"
-            " VALUES (?, ?, ?, ?, 'pending', 0, ?)",
-            (task_id, kind, due_slot_utc, payload_json, ts),
+            "INSERT INTO tasks(task_id, kind, due_slot_utc, job_key, payload_json, state, generation, created_at)"
+            " VALUES (?, ?, ?, ?, ?, 'pending', 0, ?)",
+            (task_id, kind, due_slot_utc, job_key, payload_json, ts),
         )
     return task_id, True
 
@@ -556,6 +660,104 @@ def complete(
             (status, task_id),
         )
         connection.execute("DELETE FROM claims WHERE task_id=?", (task_id,))
+
+
+def assert_claim(
+    connection: sqlite3.Connection,
+    *,
+    task_id: str,
+    owner: str,
+    generation: int,
+    now: datetime | None = None,
+) -> None:
+    """Read-only fence check for work that writes the main state DB.
+
+    Investigation persistence happens in a separate SQLite database from the
+    control store.  Callers therefore check the exact owner/generation pair
+    immediately before and during their state transaction; a lost lease raises
+    instead of allowing the stale dispatch to publish a terminal receipt.
+    """
+    claim_row = connection.execute(
+        "SELECT owner, generation, expires_at_utc FROM claims WHERE task_id=?",
+        (task_id,),
+    ).fetchone()
+    if claim_row is None:
+        raise ClaimMismatchError(f"task {task_id} has no live claim")
+    if claim_row["owner"] != owner:
+        raise ClaimMismatchError(
+            f"task {task_id} owner mismatch: have {claim_row['owner']!r}, got {owner!r}"
+        )
+    if claim_row["generation"] != generation:
+        raise ClaimMismatchError(
+            f"task {task_id} generation mismatch: have {claim_row['generation']}, got {generation}"
+        )
+    ref_now = (now or datetime.now(UTC)).astimezone(UTC)
+    if _parse_utc_iso(claim_row["expires_at_utc"]) <= ref_now:
+        raise ClaimMismatchError(
+            f"task {task_id} claim expired at {claim_row['expires_at_utc']}"
+        )
+
+
+def retry_investigation(
+    connection: sqlite3.Connection,
+    *,
+    task_id: str,
+    payload: dict[str, Any],
+) -> None:
+    """Explicitly advance one failed/blocked investigation to its next round.
+
+    The deterministic task and investigation IDs remain unchanged.  Retry is
+    intentionally not part of :func:`enqueue`: callers must provide exactly
+    the same candidate identity and a monotonic ``round_number`` increment.
+    """
+    validate_kind("investigate")
+    payload = validate_payload(dict(payload))
+    from news_pipeline.investigation import validate_investigation_payload
+
+    validate_investigation_payload(payload)
+    job_key = str(payload["investigation_id"])
+    with _immediate_tx(connection):
+        row = connection.execute(
+            "SELECT kind, due_slot_utc, state, payload_json FROM tasks WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            raise ControlStoreError(f"task {task_id} not found")
+        if row["kind"] != "investigate":
+            raise ControlStoreError(f"task {task_id} is not an investigation task")
+        expected_task_id = deterministic_task_id(
+            "investigate", row["due_slot_utc"], job_key=job_key
+        )
+        if expected_task_id != task_id:
+            raise PayloadConflictError(
+                f"retry payload investigation identity does not match task {task_id}"
+            )
+        if row["state"] not in {"failed"}:
+            raise ControlStoreError(
+                f"investigation task {task_id} is not retryable from state {row['state']!r}"
+            )
+        try:
+            previous = json.loads(row["payload_json"])
+        except json.JSONDecodeError as exc:
+            raise ControlStoreError(f"task {task_id} has invalid stored payload") from exc
+        validate_investigation_payload(previous)
+        if any(previous[key] != payload[key] for key in (
+            "investigation_id", "candidate_id", "feed_lane_id", "query_plan_id", "category",
+        )):
+            raise PayloadConflictError(
+                f"retry payload changes the investigation identity for task {task_id}"
+            )
+        if payload["round_number"] != previous["round_number"] + 1:
+            raise ControlStoreError(
+                "investigation retry must advance round_number by exactly one"
+            )
+        payload_json = json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        )
+        connection.execute(
+            "UPDATE tasks SET state='pending', payload_json=? WHERE task_id=?",
+            (payload_json, task_id),
+        )
 
 
 # ---------------------------------------------------------------------------

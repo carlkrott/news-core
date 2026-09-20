@@ -15,7 +15,7 @@ outside this tree.
 
 | Path                                         | Purpose                                                    |
 |----------------------------------------------|------------------------------------------------------------|
-| `scripts/news_pipeline/`                     | Application core (ingest, process, validate, report).      |
+| `scripts/news_pipeline/`                     | Application core (ingest, investigate, process, validate, report). |
 | `scripts/news_container/`                    | Scheduler, role worker, control store, broker client/protocol. |
 | `bin/news-*`                                 | Bash entrypoints that call into the application core.      |
 | `scripts/check_publication_safety.py`        | Export-safety scanner (see below).                         |
@@ -24,7 +24,7 @@ outside this tree.
 | `CHANGELOG.md`                               | Public source history and release limitations.             |
 | `tests/news_pipeline/test_publication_safety.py` | Focused publication-safety tests.                     |
 | `config/*.example.toml`                      | Sanitized placeholder configuration.                       |
-| `Dockerfile` / `compose*.yaml`               | Hardened image and five-role Compose topology.              |
+| `Dockerfile` / `compose*.yaml`               | Hardened image and six-role Compose topology.                |
 | `host/`                                      | Public host-side egress broker and example policy.          |
 | `deploy/systemd/`                            | Example systemd broker unit and environment template.      |
 | `README.md` / `ARCHITECTURE.md` / ...        | Operator and reviewer documentation.                       |
@@ -54,7 +54,7 @@ publication tooling stay outside the image layer.
 ## Architecture in one paragraph
 
 The news core is a Python 3.11+ stdlib application split into two
-parts: `news_pipeline` (ingest → process → validate → report) and
+parts: `news_pipeline` (ingest → investigate → process → validate → report) and
 `news_container` (a scheduler + role workers with a control store).
 Every application container runs with `network_mode: none`; the only
 network egress path is via host-side Unix-domain-socket brokers

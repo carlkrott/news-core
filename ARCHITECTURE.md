@@ -30,7 +30,7 @@ entrypoints run in development, in the container image, and in CI.
 
 ## 2. Compose roles
 
-One digest-pinned image runs five distinct Compose services.  Each
+One digest-pinned image runs six distinct Compose services.  Each
 service executes a single command against a narrow subset of mounts
 and is allowed to talk only to the brokers its role requires.
 
@@ -38,6 +38,7 @@ and is allowed to talk only to the brokers its role requires.
 |----------------------|--------------------------------------------------|------------------------------------------------|---------|
 | `scheduler`          | `python -m news_container.scheduler`             | runtime control DB (RW), schedule (RO)         | none    |
 | `ingest`             | `python -m news_container.worker --kind ingest`  | canary DB (RW), configs (RO), control (RW)     | search + feed |
+| `investigate`        | `python -m news_container.worker --kind investigate` | canary DB (RW), control (RW)                | search + feed |
 | `process`            | `python -m news_container.worker --kind process` | canary DB (RW), control (RW)                   | none    |
 | `validate`           | `python -m news_container.worker --kind validate`| canary DB (RO/RW only as required for control receipt) | none |
 | `report`             | `python -m news_container.worker --kind report`  | canary DB (RW), artifact root (RW), control (RW)| none    |
@@ -68,10 +69,10 @@ them over the filesystem.
 | `delivery.sock` | **Not created, mounted, or enabled** in the public surface.             | n/a              |
 
 Broker authorization is enforced by Unix-socket filesystem ownership
-and per-service mount selection: only the `ingest` service mounts
-`search.sock` and `feed.sock`; only the role that owns the broker can
-dial it.  No bearer token, JWT, or HTTP `Authorization` header is
-required inside the container.
+and per-service mount selection: the `ingest` and `investigate` services
+mount `search.sock` and `feed.sock`; only the roles that own the broker
+routes can dial them.  No bearer token, JWT, or HTTP `Authorization`
+header is required inside the container.
 
 Broker logs record route, destination class, status, byte count,
 elapsed time, and error class.  They **never** record URL query
@@ -109,7 +110,9 @@ directory, or a host identity path.
 * The scheduler and workers share a dedicated `runtime-control.db`,
   separate from `news-state.db`.
 * Scheduler inserts use deterministic `(kind, due_slot)` IDs under
-  `BEGIN IMMEDIATE`; duplicate slots are no-ops.
+  `BEGIN IMMEDIATE`; duplicate scheduled slots are no-ops.  Event-specific
+  `investigate` jobs add a deterministic `job_key`, so multiple candidates
+  due in the same slot coexist without weakening scheduled-task idempotency.
 * Each worker claims only its fixed kind with owner, generation,
   claim expiry, and attempt count.
 * Main DB work is protected by one shared `flock`; lock contention
@@ -192,3 +195,22 @@ Reports use `per_subject` scope.  The two Professional AV input categories
 may combine only after event-level QC; Audio Engineering remains separate.
 If category evidence maps to more than one subject, the assignment is
 `pending_subject_review` and is not reportable until resolved.
+
+## 11. Feed lanes and one-story investigations
+
+Each source query is normalized into one stable `feed_lane_id` derived from
+the source, pipeline category, query text, and adapter categories.  A source
+contract may cover one pipeline category only; a query seed outside that
+scope is rejected.  Ingest persists the lane on the query plan, receipt, and
+candidate link, so result lists from separate lanes cannot silently become a
+mixed discovery context.
+
+Eligible candidates enqueue an `investigate` task with one candidate ID, one
+feed lane, one query plan, and a bounded round number.  The deterministic
+investigation identity is reused on enqueue retries and lease reclaim.
+Terminal receipts are immutable; failed or blocked work advances only through
+an explicit next-round retry.  Targeted event-specific queries are persisted
+with their terminal state, and lease-fenced writes cannot publish stale
+results.  Investigation workers can use only the existing search and feed
+brokers and, like every public role, have no delivery socket or live delivery
+credential.

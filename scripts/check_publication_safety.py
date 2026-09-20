@@ -303,7 +303,7 @@ def _line_spans(*lines: int) -> tuple[tuple[int, int], ...]:
 
 CONTENT_SPAN_ALLOWANCES: dict[str, dict[str, tuple[tuple[int, int], ...]]] = {
     "README.md": {"MAINTAINER_LITERAL": _line_spans(43, 45)},
-    "ARCHITECTURE.md": {"MAINTAINER_LITERAL": _line_spans(147, 152)},
+    "ARCHITECTURE.md": {"MAINTAINER_LITERAL": _line_spans(150, 155)},
     "CONTRIBUTING.md": {"MAINTAINER_LITERAL": _line_spans(52)},
     "SECURITY.md": {
         "MAINTAINER_LITERAL": _line_spans(46, 47, 48, 49, 116),

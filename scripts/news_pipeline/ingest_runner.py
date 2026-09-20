@@ -29,11 +29,20 @@ from .adapters.base import (
 )
 from .adapters.rss import RssAdapter
 from .adapters.searxng import SearxngAdapter
-from .live_contracts import QuerySeed, QueryStatus, SourceAdapter, SourceContract, source_to_row, stable_id
+from .live_contracts import (
+    QuerySeed,
+    QueryStatus,
+    SourceAdapter,
+    SourceContract,
+    source_to_row,
+    stable_feed_lane_id,
+    stable_id,
+)
 from .provenance import PublisherRegistry, load_provenance
 from .schema_v3 import V3_COLUMNS, V3_TABLES
 from .schema_v4 import V4_COLUMNS, V4_TABLES
 from .schema_v7 import V7_COLUMNS, V7_TABLES, backfill_source_item_provenance
+from .schema_v8 import V8_COLUMNS, V8_TABLES
 from .source_registry import load_registry
 
 _GLOBAL_CONCURRENCY = 4
@@ -74,6 +83,8 @@ class QueryResult:
     error: str | None = None
     rejections: tuple[ItemRejection, ...] = field(default_factory=tuple)
     filtered_items: tuple[FilteredItem, ...] = field(default_factory=tuple)
+    feed_lane_id: str = ""
+    category: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +104,7 @@ class SourceResult:
     retries: int
     next_due_at: str | None
     error: str | None = None
+    feed_lane_ids: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +134,8 @@ class _Claim:
 class _Job:
     source: SourceContract
     query: QuerySeed
+    category: str
+    feed_lane_id: str
     query_plan_id: str
     attempt_id: str
     lease_expires_at: str
@@ -289,6 +303,7 @@ def _verify_schema(db_path: Path) -> None:
                 {1, 2, 3, 4, 5},
                 {1, 2, 3, 4, 5, 6},
                 {1, 2, 3, 4, 5, 6, 7},
+                {1, 2, 3, 4, 5, 6, 7, 8},
             )
             if markers not in accepted_markers:
                 raise ValueError(
@@ -306,6 +321,10 @@ def _verify_schema(db_path: Path) -> None:
             if markers == {1, 2, 3, 4, 5, 6, 7}:
                 required |= set(V7_TABLES)
                 expected_columns.update(V7_COLUMNS)
+            if markers == {1, 2, 3, 4, 5, 6, 7, 8}:
+                required |= set(V7_TABLES) | set(V8_TABLES)
+                expected_columns.update(V7_COLUMNS)
+                expected_columns.update(V8_COLUMNS)
             missing = sorted(required - tables)
             if missing:
                 raise ValueError(f"database is missing required tables: {missing}")
@@ -322,6 +341,12 @@ def _verify_schema(db_path: Path) -> None:
 def _has_schema_v7(connection: sqlite3.Connection) -> bool:
     return connection.execute(
         "SELECT 1 FROM schema_migrations WHERE version=7"
+    ).fetchone() is not None
+
+
+def _has_schema_v8(connection: sqlite3.Connection) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE version=8"
     ).fetchone() is not None
 
 
@@ -448,10 +473,14 @@ def _prepare_jobs(
             for row in connection.execute("SELECT source_id,etag,last_modified FROM fetch_state")
         }
         for claim in claims:
-            category = claim.source.category_scope[0]
+            fallback_category = claim.source.category_scope[0]
             for query in claim.queries:
+                category = query.pipeline_category or fallback_category
+                feed_lane_id = query.feed_lane_id or stable_feed_lane_id(
+                    claim.source.source_id, category, query.text, query.categories
+                )
                 plan_id = stable_id(
-                    "query-plan", claim.source.source_id, category, query.text, "\x1f".join(query.categories)
+                    "query-plan", claim.source.source_id, category, query.text, feed_lane_id
                 )
                 connection.execute(
                     """INSERT OR IGNORE INTO query_plans(
@@ -481,6 +510,8 @@ def _prepare_jobs(
                     _Job(
                         source=claim.source,
                         query=query,
+                        category=category,
+                        feed_lane_id=feed_lane_id,
                         query_plan_id=plan_id,
                         attempt_id=attempt_id,
                         lease_expires_at=claim.lease_expires_at,
@@ -506,7 +537,7 @@ async def _fetch_job(
     now: UtcNow,
 ) -> _NetworkOutcome:
     transport = transport_factory(job.source) if transport_factory is not None else None
-    category = job.source.category_scope[0]
+    category = job.category
     if job.source.adapter_type is SourceAdapter.SEARXNG:
         adapter = SearxngAdapter(job.source, category=category, transport=transport)
         fetch = adapter.fetch_query
@@ -570,10 +601,32 @@ def _persist_outcome(
     for item in kept:
         if item.source_id != job.source.source_id:
             rejections.append(ItemRejection(-1, "SOURCE_MISMATCH", "adapter item source_id does not match claimed source"))
-        elif item.category not in job.source.category_scope:
+        elif item.category != job.category:
             rejections.append(ItemRejection(-1, "CATEGORY_MISMATCH", "adapter item category is outside source scope"))
         else:
             valid_items.append(item)
+
+    if _has_schema_v8(connection):
+        lane_valid_items: list[NormalizedItem] = []
+        for item in valid_items:
+            existing_categories = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT DISTINCT category FROM candidate_feed_lanes WHERE source_item_id=?",
+                    (item.source_item_id,),
+                )
+            }
+            if existing_categories and existing_categories != {job.category}:
+                rejections.append(
+                    ItemRejection(
+                        -1,
+                        "FEED_LANE_CATEGORY_REUSE",
+                        "source item identity was already attached to another pipeline category",
+                    )
+                )
+            else:
+                lane_valid_items.append(item)
+        valid_items = lane_valid_items
 
     connection.execute("BEGIN IMMEDIATE")
     try:
@@ -588,6 +641,7 @@ def _persist_outcome(
                 0, 0, len(rejections), len(filtered), outcome.retries,
                 _retry_after_int(result.retry_after), result.rate_limit_reset,
                 "source lease was replaced before persistence", tuple(rejections), tuple(filtered),
+                job.feed_lane_id, job.category,
             )
 
         inserted = 0
@@ -619,6 +673,42 @@ def _persist_outcome(
                 outcome.finished_at,
                 source_item_ids=tuple(item.source_item_id for item in valid_items),
             )
+
+        if _has_schema_v8(connection):
+            result_set_hash = hashlib.sha256(
+                json.dumps(
+                    tuple(sorted(item.source_item_id for item in valid_items)),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            receipt_id = stable_id("feed-lane-receipt", job.feed_lane_id, job.attempt_id, length=64)
+            connection.execute(
+                """INSERT INTO feed_lane_receipts(
+                       receipt_id,feed_lane_id,source_id,query_plan_id,attempt_id,category,
+                       result_set_hash,returned_count,inserted_count,duplicate_count,rejected_count,recorded_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(feed_lane_id,attempt_id) DO UPDATE SET
+                       result_set_hash=excluded.result_set_hash,returned_count=excluded.returned_count,
+                       inserted_count=excluded.inserted_count,duplicate_count=excluded.duplicate_count,
+                       rejected_count=excluded.rejected_count,recorded_at=excluded.recorded_at""",
+                (
+                    receipt_id, job.feed_lane_id, job.source.source_id, job.query_plan_id,
+                    job.attempt_id, job.category, result_set_hash,
+                    len(result.items) + len(result.rejections), inserted, duplicate,
+                    len(rejections), outcome.finished_at,
+                ),
+            )
+            for item in valid_items:
+                connection.execute(
+                    """INSERT OR IGNORE INTO candidate_feed_lanes(
+                           source_item_id,feed_lane_id,query_plan_id,attempt_id,category,first_seen_at)
+                       VALUES(?,?,?,?,?,?)""",
+                    (
+                        item.source_item_id, job.feed_lane_id, job.query_plan_id,
+                        job.attempt_id, job.category, outcome.finished_at,
+                    ),
+                )
 
         status, error = _query_status(result, bool(rejections or filtered))
         error_count = len(rejections) + (1 if result.error is not None else 0)
@@ -681,6 +771,8 @@ def _persist_outcome(
         error=error,
         rejections=tuple(rejections),
         filtered_items=tuple(filtered),
+        feed_lane_id=job.feed_lane_id,
+        category=job.category,
     )
 
 
@@ -808,6 +900,7 @@ def _finalize_sources(
                 retries=sum(result.retries for result in selected),
                 next_due_at=effective_next_due,
                 error="; ".join(errors) if errors else ("source lease was replaced" if effective_next_due is None else None),
+                feed_lane_ids=tuple(sorted({result.feed_lane_id for result in selected if result.feed_lane_id})),
             )
         )
     return results

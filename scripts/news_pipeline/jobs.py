@@ -9,7 +9,7 @@ import sqlite3
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -26,6 +26,7 @@ def _parser() -> argparse.ArgumentParser:
     tick.add_argument("--source-id", action="append", dest="source_ids")
     tick.add_argument("--max-queries", type=int)
     tick.add_argument("--enable-network", action="store_true")
+    tick.add_argument("--control-db")
 
     process = sub.add_parser("process")
     _add_common_db(process)
@@ -33,6 +34,21 @@ def _parser() -> argparse.ArgumentParser:
     process.add_argument("--history-db")
     process.add_argument("--max-items", type=int, default=500)
     process.add_argument("--enable-network", action="store_true")
+
+    investigate = sub.add_parser("investigate")
+    _add_common_db(investigate)
+    investigate.add_argument("--candidate-id", required=True)
+    investigate.add_argument("--feed-lane-id", required=True)
+    investigate.add_argument("--query-plan-id", required=True)
+    investigate.add_argument("--investigation-id", required=True)
+    investigate.add_argument("--category", required=True)
+    investigate.add_argument("--round-number", type=int, default=0)
+    investigate.add_argument("--evaluated-at", required=True)
+    investigate.add_argument("--enable-network", action="store_true")
+    investigate.add_argument("--control-db")
+    investigate.add_argument("--control-task-id")
+    investigate.add_argument("--control-owner")
+    investigate.add_argument("--control-generation", type=int)
 
     for name in ("daily-close", "daily-report"):
         report = sub.add_parser(name)
@@ -97,10 +113,32 @@ def _run_tick(args: argparse.Namespace) -> int:
             max_queries=args.max_queries,
             transport_factory=transport_factory,
         )
+        investigations_enqueued: tuple[tuple[str, bool], ...] = ()
+        if args.control_db:
+            from .investigation import enqueue_candidate_investigations
+            from news_container.control_store import open as open_control
+
+            control = open_control(args.control_db)
+            try:
+                investigations_enqueued = enqueue_candidate_investigations(
+                    args.db,
+                    control,
+                    due_slot_utc=args.run_started_at,
+                )
+            finally:
+                control.close()
     except Exception as exc:
         _json({"error": {"type": "runtime", "message": str(exc)}})
         return 1
-    _json({"job": "tick", "state": "completed", "network_used": True, "report": report.__dict__ if hasattr(report, "__dict__") else str(report)})
+    _json({
+        "job": "tick",
+        "state": "completed",
+        "network_used": True,
+        "report": report.__dict__ if hasattr(report, "__dict__") else str(report),
+        "investigations_enqueued": sum(
+            1 for _task_id, created in investigations_enqueued if created
+        ),
+    })
     return 0
 
 
@@ -130,6 +168,80 @@ def _run_process(args: argparse.Namespace) -> int:
         "event_report": event_report.__dict__ if hasattr(event_report, "__dict__") else str(event_report),
     })
     return 0
+
+
+def _run_investigate(args: argparse.Namespace) -> int:
+    if not args.enable_network:
+        return _disabled("investigate", "activation_gate_not_enabled")
+    try:
+        from .investigation import investigation_id, run_investigation
+
+        expected_id = investigation_id(args.candidate_id, args.feed_lane_id, args.query_plan_id)
+        if args.investigation_id != expected_id:
+            raise ValueError("--investigation-id is not deterministic for the candidate")
+        transport_factory = None
+        if os.environ.get("NEWS_CONTAINER_MODE") == "1":
+            from news_container.broker_client import broker_transport_factory
+
+            transport_factory = broker_transport_factory
+        fence_values = (
+            args.control_db,
+            args.control_task_id,
+            args.control_owner,
+            args.control_generation,
+        )
+        if not all(value is not None for value in fence_values):
+            raise ValueError(
+                "investigate requires --control-db, --control-task-id, "
+                "--control-owner, and --control-generation"
+            )
+        lease_check: Callable[[], None] | None = None
+        if all(value is not None for value in fence_values):
+            from news_container.control_store import assert_claim
+
+            def _check_lease() -> None:
+                uri = f"{Path(args.control_db).resolve().as_uri()}?mode=ro"
+                control = sqlite3.connect(uri, uri=True, timeout=5.0)
+                control.row_factory = sqlite3.Row
+                try:
+                    assert_claim(
+                        control,
+                        task_id=args.control_task_id,
+                        owner=args.control_owner,
+                        generation=args.control_generation,
+                    )
+                finally:
+                    control.close()
+
+            lease_check = _check_lease
+
+        result = run_investigation(
+            args.db,
+            candidate_id=args.candidate_id,
+            feed_lane_id=args.feed_lane_id,
+            query_plan_id=args.query_plan_id,
+            category=args.category,
+            evaluated_at=args.evaluated_at,
+            round_number=args.round_number,
+            transport_factory=transport_factory,
+            lease_check=lease_check,
+        )
+    except Exception as exc:
+        _json({"error": {"type": "runtime", "message": str(exc)}})
+        return 1
+    _json({
+        "job": "investigate",
+        "state": result.job.state,
+        "network_used": result.network_used,
+        "investigation_id": result.job.investigation_id,
+        "candidate_id": result.job.candidate_id,
+        "feed_lane_id": result.job.feed_lane_id,
+        "round_number": result.job.round_number,
+        "terminal_state": result.job.terminal_state,
+        "targeted_query_count": len(result.targeted_queries),
+        "evidence_count": sum(item.returned_count for item in result.query_results),
+    })
+    return 0 if result.job.state == "complete" else 1
 
 
 def _report_args(args: argparse.Namespace) -> tuple[datetime, datetime | None]:
@@ -224,6 +336,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_tick(args)
     if args.job == "process":
         return _run_process(args)
+    if args.job == "investigate":
+        return _run_investigate(args)
     if args.job in {"daily-close", "daily-report"}:
         return _run_daily_report(args)
     if args.job == "health":

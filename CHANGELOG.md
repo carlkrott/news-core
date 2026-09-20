@@ -16,6 +16,13 @@ All notable changes to the public news-core source are recorded here.
   matching, and fail-closed independence groups.  Live publisher rules remain
   private overlays; this structural change performs no live migration or
   delivery cutover.
+- Added isolated feed-lane identities and per-candidate `investigate` jobs:
+  query seeds are category-scoped, receipts retain lane provenance, ingest
+  enqueues deterministic one-candidate tasks, targeted investigation plans are
+  bounded, terminal receipts are immutable, and failed work has an explicit
+  bounded-round retry path with lease-fenced state writes.  Public workers
+  remain delivery-disabled.  This structural change performs no live migration
+  or schedule activation.
 
 ## [0.1.0] - 2026-09-15
 

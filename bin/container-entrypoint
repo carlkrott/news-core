@@ -4,6 +4,7 @@
 # Roles:
 #   scheduler      -> python -m news_container.scheduler once|loop
 #   ingest         -> python -m news_container.worker --kind ingest
+#   investigate    -> python -m news_container.worker --kind investigate
 #   process        -> python -m news_container.worker --kind process
 #   validate       -> python -m news_container.worker --kind validate
 #   report         -> python -m news_container.worker --kind report
@@ -28,7 +29,7 @@ if [[ -z "${ROLE}" ]]; then
 fi
 
 case "${ROLE}" in
-  scheduler|ingest|process|validate|report) ;;
+  scheduler|ingest|investigate|process|validate|report) ;;
   *)
     printf 'container-entrypoint: unknown role %s\n' "${ROLE}" >&2
     exit 64
@@ -83,7 +84,7 @@ case "${ROLE}" in
       --db       "${NEWS_CONTAINER_CONTROL_DB:-/state/runtime-control.db}" \
       "${extra_args[@]}"
     ;;
-  ingest|process|validate|report)
+  ingest|investigate|process|validate|report)
     : "${NEWS_CONTAINER_CONTROL_DB:?NEWS_CONTAINER_CONTROL_DB is required}"
     : "${NEWS_CONTAINER_STATE_DB:?NEWS_CONTAINER_STATE_DB is required}"
     : "${NEWS_CONTAINER_ARTIFACT_ROOT:?NEWS_CONTAINER_ARTIFACT_ROOT is required}"

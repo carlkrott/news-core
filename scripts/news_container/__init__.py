@@ -33,7 +33,7 @@ __all__ = ["ALLOWED_KINDS", "DELIVERY_KIND_FORBIDDEN"]
 # Anything outside this set is refused at enqueue time.  The
 # ``delivery`` kind is explicitly forbidden: live delivery is not a
 # concern of the runtime-control slice.
-ALLOWED_KINDS = frozenset({"ingest", "process", "validate", "report"})
+ALLOWED_KINDS = frozenset({"ingest", "investigate", "process", "validate", "report"})
 
 # Names the workers must never let through their vocabulary.
 DELIVERY_KIND_FORBIDDEN = "delivery"
