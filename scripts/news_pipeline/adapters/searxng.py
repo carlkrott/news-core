@@ -26,7 +26,7 @@ import json
 import urllib.parse
 from typing import Any
 
-from ..canonicalization import canonicalize_url
+from ..canonicalization import canonicalize_url, non_article_url_reason
 from ..live_contracts import QuerySeed, SourceAdapter, SourceContract, stable_id
 from .base import (
     Adapter,
@@ -174,6 +174,13 @@ class SearxngAdapter(Adapter):
             canonical_url = canonicalize_url(original_url)
         except ValueError:
             return None, ItemRejection(idx, "INVALID_URL", f"result[{idx}] has invalid URL {original_url!r}")
+        route_reason = non_article_url_reason(canonical_url)
+        if route_reason is not None:
+            return None, ItemRejection(
+                idx,
+                "NON_ARTICLE_URL",
+                f"result[{idx}] is a {route_reason.replace('_', ' ')} route",
+            )
 
         title: str | None = None
         raw_title = raw.get("title")
@@ -208,8 +215,10 @@ class SearxngAdapter(Adapter):
                 published_at = normalized
                 publication_evidence = f"metadata:{raw_date.strip()}"
             else:
+                publication_evidence = "unparseable"
                 unknown_date_reason = "unparseable-published-date"
         else:
+            publication_evidence = "missing"
             unknown_date_reason = "missing-published-date"
 
         raw_updated = raw.get("updatedDate")

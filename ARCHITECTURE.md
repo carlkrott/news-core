@@ -214,3 +214,32 @@ with their terminal state, and lease-fenced writes cannot publish stale
 results.  Investigation workers can use only the existing search and feed
 brokers and, like every public role, have no delivery socket or live delivery
 credential.
+
+## 12. Admission quality and report URL completeness
+
+Canonicalization is syntactic and route-aware.  Tracking parameters,
+fragments, default ports, host case, IDNA, query ordering, and dot segments
+are normalized deterministically.  Root, home, index, tag, and search routes
+are rejected as non-article results; near-miss article paths such as
+`/homepage`, `/tagged`, `/searchlight`, and `/indexing` are not rejected by
+substring matching.
+
+Adapters and the ingest persistence boundary both enforce the article-URL
+contract.  Missing, malformed, mismatched, non-canonical, and non-article
+URLs remain rejection/audit evidence and never become persisted article
+records.  Ingest receipts expose URL and publication-date coverage per feed
+lane, category, and mapped subject.
+
+Phase 2 records explicit date evidence (`source`, `metadata`,
+`observed_fallback`, `missing`, or `unparseable`) and recency status
+(`fresh`, `future_clamped`, `stale`, `missing`, or `invalid`).  Candidates
+without a URL are retained only as `audit_only` pending decisions; they do
+not enter history matching, event creation, or reports.  Subject policy
+`recency_days` is the authority for freshness and exact URL/identity history
+lookbacks when the process job receives the three versioned configuration
+paths.
+
+Report selection requires a verified event to have at least one non-empty
+canonical source URL through its event-claim provenance chain.  URL-incomplete
+events are excluded before briefing and artifact linkage; delivery remains
+disabled.

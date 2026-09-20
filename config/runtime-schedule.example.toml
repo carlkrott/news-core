@@ -42,6 +42,9 @@ notes = "Matches the current Phase 6 process cadence."
 
 [schedule.phase6_process.payload]
 max_items = 500
+sources = "/app/config/news-sources.toml"
+topics = "/app/config/news-topics.toml"
+policy = "/app/config/news-policy.toml"
 
 [schedule.morning_process_drain]
 kind = "process"
@@ -52,6 +55,9 @@ notes = "Matches the current final morning process drain."
 
 [schedule.morning_process_drain.payload]
 max_items = 500
+sources = "/app/config/news-sources.toml"
+topics = "/app/config/news-topics.toml"
+policy = "/app/config/news-policy.toml"
 
 [schedule.shadow_report]
 kind = "report"

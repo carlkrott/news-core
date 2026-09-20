@@ -126,6 +126,12 @@ def _process_argv(ctx: DispatchContext) -> list[str]:
         if not isinstance(history_db, str) or not history_db:
             raise ValueError("payload field 'history_db' must be a non-empty string")
         argv += ["--history-db", history_db]
+    config_values = tuple(ctx.payload.get(key) for key in ("sources", "topics", "policy"))
+    if any(value is not None for value in config_values):
+        if not all(isinstance(value, str) and value for value in config_values):
+            raise ValueError("payload fields 'sources', 'topics', and 'policy' must be non-empty strings together")
+        for key, value in zip(("--sources", "--topics", "--policy"), config_values):
+            argv += [key, value]
     return argv
 
 

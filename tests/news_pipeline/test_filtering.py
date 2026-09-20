@@ -227,7 +227,9 @@ class DeterministicPipelineTests(unittest.TestCase):
         )
         c = _candidate(candidate_id="c1", original_url=None, canonical_url=None)
         results = evaluate_candidates([c], self.db_path, self.source, self.policies)
-        self.assertEqual(results[0].decision, DecisionCode.SUPPRESS_EXACT_IDENTITY)
+        self.assertEqual(results[0].decision, DecisionCode.PENDING_MISSING_EVIDENCE)
+        self.assertTrue(results[0].audit_only)
+        self.assertIn(ReasonCode.MISSING_URL, results[0].reasons)
 
     def test_history_exact_title_changed_snippet_pending(self):
         # Title lookback is 72h, so seed within that window.

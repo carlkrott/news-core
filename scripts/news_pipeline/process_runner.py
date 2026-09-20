@@ -124,8 +124,11 @@ def candidate_from_source_item(row: Mapping[str, object], evaluated_at: str) -> 
         evidence_raw == "metadata" or evidence_raw.startswith("metadata:")
     ):
         evidence = "metadata"
-    elif raw_published in (None, "") and evidence_raw in (None, ""):
+    elif raw_published in (None, "") and evidence_raw in (None, "", "missing"):
         evidence = "missing"
+        published_at = None
+    elif evidence_raw == "unparseable":
+        evidence = "unparseable"
         published_at = None
     else:
         evidence = "unparseable"
@@ -183,6 +186,9 @@ def _reason_json(
             "matched_observation_ids": list(semantic_result.matched_observation_ids),
             "phase2_decision": filter_result.decision.value,
             "phase2_reasons": [reason.value for reason in filter_result.reasons],
+            "date_evidence": filter_result.date_evidence,
+            "recency_status": filter_result.recency_status,
+            "audit_only": filter_result.audit_only,
             "semantic_decision": semantic_result.semantic_decision.value,
             "semantic_reasons": [reason.value for reason in semantic_result.semantic_reasons],
             "source_item_id": source_item_id,

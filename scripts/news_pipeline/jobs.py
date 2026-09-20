@@ -32,6 +32,9 @@ def _parser() -> argparse.ArgumentParser:
     _add_common_db(process)
     process.add_argument("--evaluated-at")
     process.add_argument("--history-db")
+    process.add_argument("--sources")
+    process.add_argument("--topics")
+    process.add_argument("--policy")
     process.add_argument("--max-items", type=int, default=500)
     process.add_argument("--enable-network", action="store_true")
 
@@ -150,7 +153,23 @@ def _run_process(args: argparse.Namespace) -> int:
         return 2
     from .process_runner import process_news
     try:
-        report = process_news(args.db, args.evaluated_at, history_db_path=args.history_db, max_items=args.max_items)
+        config_paths = (args.sources, args.topics, args.policy)
+        if any(config_paths) and not all(config_paths):
+            raise ValueError("process requires --sources, --topics, and --policy together")
+        query_policies = None
+        if all(config_paths):
+            from .policies import query_policies_from_subject_policies
+            from .source_registry import load_registry
+
+            config = load_registry(args.sources, args.topics, args.policy)
+            query_policies = query_policies_from_subject_policies(config.subjects_by_id)
+        report = process_news(
+            args.db,
+            args.evaluated_at,
+            history_db_path=args.history_db,
+            query_policies=query_policies,
+            max_items=args.max_items,
+        )
         from .event_store import process_phase4
         event_report = process_phase4(
             args.db,

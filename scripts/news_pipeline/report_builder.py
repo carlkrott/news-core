@@ -144,6 +144,21 @@ def _validated_event_status(state: object, superseded_at: object) -> tuple[str, 
     return state_value, superseded_value
 
 
+def _has_canonical_source_url(con: sqlite3.Connection, event_id: str, version: int) -> bool:
+    row = con.execute(
+        """SELECT 1
+           FROM event_claims ec
+           JOIN claims c ON c.claim_id=ec.claim_id
+           JOIN source_items si ON si.source_item_id=c.source_item_id
+          WHERE ec.event_id=? AND ec.event_version=?
+            AND si.canonical_url IS NOT NULL
+            AND trim(si.canonical_url) <> ''
+          LIMIT 1""",
+        (event_id, version),
+    ).fetchone()
+    return row is not None
+
+
 def _latest_events(con: sqlite3.Connection, lower: str, upper: str) -> list[tuple[str, int, str, str, str, str]]:
     rows = con.execute("""
         SELECT ev.event_id, ev.version, ev.summary, e.category, ev.valid_from,
@@ -164,6 +179,8 @@ def _latest_events(con: sqlite3.Connection, lower: str, upper: str) -> list[tupl
         if state != "verified" or superseded_at is not None:
             continue
         if row[5].strip().casefold() == "retraction":
+            continue
+        if not _has_canonical_source_url(con, row[0], row[1]):
             continue
         checked.append(row)
     return sorted(checked, key=lambda row: (_parse_z(row[4], "valid_from"), row[0], row[1]))
@@ -374,7 +391,16 @@ def _recover_completed_events(
         SELECT ev.event_id,ev.version,ev.summary,e.category,ev.valid_from,
                ev.material_change_reason,ev.verification_state,ev.superseded_at
         FROM event_versions ev JOIN events e ON e.id=ev.event_id
-    """).fetchall():
+        WHERE EXISTS (
+            SELECT 1
+            FROM event_claims ec
+            JOIN claims c ON c.claim_id=ec.claim_id
+            JOIN source_items si ON si.source_item_id=c.source_item_id
+            WHERE ec.event_id=ev.event_id
+              AND ec.event_version=ev.version
+              AND si.canonical_url IS NOT NULL
+              AND trim(si.canonical_url) <> ''
+        )""").fetchall():
         cid = _candidate_id(raw[0], raw[1])
         if cid in candidates:
             raise ArtifactMismatch(f"ambiguous event-version candidate ID: {cid!r}")

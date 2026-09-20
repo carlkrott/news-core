@@ -76,3 +76,29 @@ def canonicalize_url(url: str | None) -> str | None:
     query_items.sort(key=lambda pair: (pair[0], pair[1]))
     query = urlencode(query_items, doseq=True)
     return urlunsplit((scheme, host, path, query, ""))
+
+
+_INDEX_BASENAMES = frozenset({"index", "index.htm", "index.html", "index.php"})
+_HOME_PATHS = frozenset({"/home", "/home/"})
+
+
+def non_article_url_reason(url: str | None) -> str | None:
+    """Return a deterministic rejection code for known non-article routes.
+
+    This deliberately matches complete route segments rather than substrings:
+    ``/tagged``, ``/searchlight``, ``/indexing``, and ``/homepage`` remain
+    eligible article paths unless another rule rejects them.
+    """
+    canonical = canonicalize_url(url)
+    if canonical is None:
+        return "missing_url"
+    parsed = urlsplit(canonical)
+    path = parsed.path or "/"
+    if path == "/" or path in _HOME_PATHS:
+        return "home_page"
+    segments = tuple(segment.casefold() for segment in path.split("/") if segment)
+    if segments and segments[0] in {"search", "tag", "tags"}:
+        return f"{segments[0]}_page" if segments[0] != "tags" else "tag_page"
+    if segments and segments[-1] in _INDEX_BASENAMES:
+        return "index_page"
+    return None

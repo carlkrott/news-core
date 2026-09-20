@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Sequence
 from urllib.parse import urlsplit
 
+from .canonicalization import canonicalize_url, non_article_url_reason
 from .adapters.base import (
     AdapterError,
     FetchResult,
@@ -44,6 +45,7 @@ from .schema_v4 import V4_COLUMNS, V4_TABLES
 from .schema_v7 import V7_COLUMNS, V7_TABLES, backfill_source_item_provenance
 from .schema_v8 import V8_COLUMNS, V8_TABLES
 from .source_registry import load_registry
+from .models import subject_for_category
 
 _GLOBAL_CONCURRENCY = 4
 _HOST_CONCURRENCY = 1
@@ -85,6 +87,14 @@ class QueryResult:
     filtered_items: tuple[FilteredItem, ...] = field(default_factory=tuple)
     feed_lane_id: str = ""
     category: str = ""
+    subject: str = ""
+    url_eligible_count: int = 0
+    url_missing_count: int = 0
+    url_non_article_count: int = 0
+    date_source_count: int = 0
+    date_metadata_count: int = 0
+    date_missing_count: int = 0
+    date_unparseable_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -604,6 +614,27 @@ def _persist_outcome(
         elif item.category != job.category:
             rejections.append(ItemRejection(-1, "CATEGORY_MISMATCH", "adapter item category is outside source scope"))
         else:
+            try:
+                original = canonicalize_url(item.original_url)
+                canonical = canonicalize_url(item.canonical_url)
+            except (TypeError, ValueError):
+                rejections.append(ItemRejection(-1, "INVALID_URL", "adapter item has an invalid HTTP(S) URL"))
+                continue
+            if original is None or canonical is None:
+                rejections.append(ItemRejection(-1, "MISSING_URL", "adapter item lacks a canonical article URL"))
+                continue
+            if original != canonical:
+                rejections.append(ItemRejection(-1, "CANONICAL_MISMATCH", "adapter item original and canonical URLs disagree"))
+                continue
+            route_reason = non_article_url_reason(canonical)
+            if route_reason is not None:
+                rejections.append(
+                    ItemRejection(-1, "NON_ARTICLE_URL", f"adapter item is a {route_reason.replace('_', ' ')} route")
+                )
+                continue
+            if item.canonical_url != canonical:
+                rejections.append(ItemRejection(-1, "NON_CANONICAL_URL", "adapter item canonical_url is not normalized"))
+                continue
             valid_items.append(item)
 
     if _has_schema_v8(connection):
@@ -628,6 +659,24 @@ def _persist_outcome(
                 lane_valid_items.append(item)
         valid_items = lane_valid_items
 
+    subject = subject_for_category(job.category).value
+    url_eligible_count = len(valid_items) + len(filtered)
+    url_missing_count = sum(1 for rejection in rejections if rejection.code == "MISSING_URL")
+    url_non_article_count = sum(
+        1 for rejection in rejections if rejection.code == "NON_ARTICLE_URL"
+    )
+    date_counts = {"source": 0, "metadata": 0, "missing": 0, "unparseable": 0}
+    for item in valid_items:
+        evidence = item.publication_evidence
+        if evidence == "source":
+            date_counts["source"] += 1
+        elif evidence == "missing" or evidence is None:
+            date_counts["missing"] += 1
+        elif evidence == "unparseable":
+            date_counts["unparseable"] += 1
+        else:
+            date_counts["metadata"] += 1
+
     connection.execute("BEGIN IMMEDIATE")
     try:
         lease = connection.execute(
@@ -641,7 +690,9 @@ def _persist_outcome(
                 0, 0, len(rejections), len(filtered), outcome.retries,
                 _retry_after_int(result.retry_after), result.rate_limit_reset,
                 "source lease was replaced before persistence", tuple(rejections), tuple(filtered),
-                job.feed_lane_id, job.category,
+                job.feed_lane_id, job.category, subject, url_eligible_count, url_missing_count,
+                url_non_article_count, date_counts["source"], date_counts["metadata"],
+                date_counts["missing"], date_counts["unparseable"],
             )
 
         inserted = 0
@@ -773,6 +824,14 @@ def _persist_outcome(
         filtered_items=tuple(filtered),
         feed_lane_id=job.feed_lane_id,
         category=job.category,
+        subject=subject,
+        url_eligible_count=url_eligible_count,
+        url_missing_count=url_missing_count,
+        url_non_article_count=url_non_article_count,
+        date_source_count=date_counts["source"],
+        date_metadata_count=date_counts["metadata"],
+        date_missing_count=date_counts["missing"],
+        date_unparseable_count=date_counts["unparseable"],
     )
 
 
