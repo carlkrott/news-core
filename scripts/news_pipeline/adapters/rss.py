@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 
-from ..canonicalization import canonicalize_url
+from ..canonicalization import canonicalize_url, non_article_url_reason
 from ..live_contracts import QuerySeed, SourceAdapter, SourceContract, stable_id
 from .base import (
     Adapter,
@@ -271,13 +271,21 @@ def _canonical_or_rejection(
     label: str,
 ) -> tuple[str | None, ItemRejection | None]:
     try:
-        return canonicalize_url(original_url), None
+        canonical = canonicalize_url(original_url)
     except ValueError:
         return None, ItemRejection(
             index,
             "INVALID_URL",
             f"{label}[{index}] has an invalid HTTP(S) URL",
         )
+    route_reason = non_article_url_reason(canonical)
+    if route_reason is not None:
+        return None, ItemRejection(
+            index,
+            "NON_ARTICLE_URL",
+            f"{label}[{index}] is a {route_reason.replace('_', ' ')} route",
+        )
+    return canonical, None
 
 
 def _publication_fields(
@@ -286,10 +294,10 @@ def _publication_fields(
     evidence_prefix: str,
 ) -> tuple[str | None, str | None, str | None]:
     if value is None:
-        return None, None, "missing-published-date"
+        return None, "missing", "missing-published-date"
     normalized = normalize_timestamp(value)
     if normalized is None:
-        return None, None, "unparseable-published-date"
+        return None, "unparseable", "unparseable-published-date"
     return normalized, f"{evidence_prefix}:{value}", None
 
 

@@ -14,7 +14,7 @@ from datetime import timedelta
 
 from .canonicalization import canonicalize_url
 from .contracts import ReasonCode, TrustTier
-from .models import Category
+from .models import CATEGORY_TO_SUBJECT, Category, Subject
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +187,7 @@ class QueryPolicy:
     exact_url_lookback: timedelta
     exact_identity_lookback: timedelta
     cross_category_exact_url: bool = True
+    subject: Subject | None = None
 
     def __post_init__(self) -> None:
         if not self.allowed_query_groups:
@@ -194,6 +195,52 @@ class QueryPolicy:
         for qg in self.allowed_query_groups:
             if not isinstance(qg, str) or not qg:
                 raise ValueError(f"QueryPolicy.allowed_query_groups contains bad entry: {qg!r}")
+
+
+def query_policies_from_subject_policies(subject_policies: object) -> dict[Category, QueryPolicy]:
+    """Build category policies from loaded subject ``recency_days`` values.
+
+    ``source_registry.SubjectPolicy`` is intentionally not imported here to
+    keep the declarative policy module independent.  The adapter accepts the
+    loaded mapping (or its values) and only reads the stable ``subject`` and
+    ``recency_days`` attributes.
+    """
+    if hasattr(subject_policies, "items"):
+        entries = tuple(subject_policies.items())  # type: ignore[union-attr]
+    else:
+        entries = tuple((getattr(policy, "subject", None), policy) for policy in subject_policies)  # type: ignore[union-attr]
+
+    recency_by_subject: dict[Subject, int] = {}
+    for key, value in entries:
+        subject_value = getattr(value, "subject", key)
+        try:
+            subject = subject_value if isinstance(subject_value, Subject) else Subject(str(subject_value))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"unknown subject policy key: {subject_value!r}") from exc
+        days = getattr(value, "recency_days", value)
+        if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+            raise ValueError(f"subject {subject.value!r} recency_days must be an integer >= 1")
+        recency_by_subject[subject] = days
+
+    missing = sorted(subject.value for subject in set(CATEGORY_TO_SUBJECT.values()) if subject not in recency_by_subject)
+    if missing:
+        raise ValueError(f"missing subject recency policies: {missing!r}")
+
+    policies: dict[Category, QueryPolicy] = {}
+    for category, subject in CATEGORY_TO_SUBJECT.items():
+        window = timedelta(days=recency_by_subject[subject])
+        policies[category] = QueryPolicy(
+            category=category,
+            allowed_query_groups=(category.value,),
+            recency=window,
+            missing_date_fallback=True,
+            exact_title_lookback=min(window, timedelta(hours=72)),
+            exact_url_lookback=window,
+            exact_identity_lookback=window,
+            cross_category_exact_url=True,
+            subject=subject,
+        )
+    return policies
 
 
 def default_query_policies() -> dict[Category, QueryPolicy]:

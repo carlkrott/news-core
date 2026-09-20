@@ -56,6 +56,7 @@ class DecisionCode(str, Enum):
     SUPPRESS_RECENT_TITLE = "suppress_recent_title"
     DROP_STALE = "drop_stale"
     DROP_BLOCKED_SOURCE = "drop_blocked_source"
+    DROP_NON_ARTICLE_URL = "drop_non_article_url"
     PENDING_MISSING_EVIDENCE = "pending_missing_evidence"
     PENDING_INVALID_EVIDENCE = "pending_invalid_evidence"
     PENDING_POSSIBLE_UPDATE = "pending_possible_update"
@@ -96,6 +97,7 @@ class ReasonCode(str, Enum):
     MALFORMED_CANONICAL_URL = "malformed_canonical_url"
     CANONICAL_MISMATCH = "canonical_mismatch"
     MISSING_URL = "missing_url"
+    NON_ARTICLE_URL = "non_article_url"
     HISTORY_UNAVAILABLE = "history_unavailable"
     CROSS_CATEGORY_PASSTHROUGH = "cross_category_passthrough"
 
@@ -157,6 +159,9 @@ class FilterResult:
     trust_tier: TrustTier
     evaluated_publication_time: str | None
     ordinal: int
+    date_evidence: str = "unknown"
+    recency_status: str = "unknown"
+    audit_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)

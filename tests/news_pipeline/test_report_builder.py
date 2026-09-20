@@ -58,6 +58,7 @@ def _insert_event_version(
     superseded_at: str | None = None,
     category: str = "ai",
     material_change_reason: str = "initial",
+    with_source: bool = True,
 ) -> None:
     """Insert one events + event_versions row."""
     # Insert event if not present.
@@ -83,6 +84,51 @@ def _insert_event_version(
             valid_from if verification_state == "verified" else None,
         ),
     )
+    if with_source and category in {item.value for item in Category}:
+        source_id = "report-source"
+        source_item_id = f"report-source-item-{event_id}-{version}"
+        claim_id = f"report-claim-{event_id}-{version}"
+        conn.execute(
+            """INSERT OR IGNORE INTO source_registry(
+                source_id, adapter_type, source_role, host, category_scope_json,
+                enabled, queries_json, title_blocklist_json, content_blocklist_json,
+                url_blocklist_json, allowlist_domains_json, config_hash, created_at
+            ) VALUES (?, 'rss', 'primary', 'example.com', ?, 1, '[]', '[]', '[]', '[]', '[]', ?, ?)""",
+            (source_id, json.dumps([category]), "0" * 64, valid_from),
+        )
+        conn.execute(
+            """INSERT INTO source_items(
+                source_item_id, source_id, external_id, category, original_url,
+                canonical_url, publisher, source_role, author_handle, retrieval_method,
+                raw_content_hash, title, body, raw, retrieved_at, published_at,
+                updated_at, publication_evidence
+            ) VALUES (?, ?, ?, ?, ?, ?, 'example.com', 'primary', NULL, 'test', ?, ?, ?, ?, ?, ?, NULL, 'source')""",
+            (
+                source_item_id,
+                source_id,
+                source_item_id,
+                category,
+                f"https://example.com/report/{event_id}/{version}",
+                f"https://example.com/report/{event_id}/{version}",
+                hashlib.sha256(source_item_id.encode()).hexdigest(),
+                summary,
+                summary,
+                summary,
+                valid_from,
+                valid_from,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO claims(
+                claim_id, source_item_id, subject, predicate, object_value,
+                statement_type, extraction_confidence, status, extracted_at
+            ) VALUES (?, ?, 'report', 'summary', ?, 'text', '0.8', 'pending', ?)""",
+            (claim_id, source_item_id, summary, valid_from),
+        )
+        conn.execute(
+            "INSERT INTO event_claims(event_id, event_version, claim_id) VALUES (?, ?, ?)",
+            (event_id, version, claim_id),
+        )
 
 
 def _as_of(hour: int = 9) -> datetime:

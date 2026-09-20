@@ -23,6 +23,13 @@ All notable changes to the public news-core source are recorded here.
   bounded-round retry path with lease-fenced state writes.  Public workers
   remain delivery-disabled.  This structural change performs no live migration
   or schedule activation.
+- Added Run 4 admission quality controls: deterministic article-route
+  classification, adapter and ingest-boundary URL validation, explicit date
+  evidence and recency statuses, subject-configured freshness/history windows,
+  per-lane URL/date coverage counters, audit-only URL-less decisions, and
+  canonical-source-URL requirements for verified report events.  Public
+  workers remain delivery-disabled; this structural change performs no live
+  migration or schedule activation.
 
 ## [0.1.0] - 2026-09-15
 

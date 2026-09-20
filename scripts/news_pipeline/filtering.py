@@ -6,9 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Mapping
 
-from .canonicalization import canonicalize_url
+from .canonicalization import canonicalize_url, non_article_url_reason
 from .contracts import CandidateArticle, DecisionCode, FilterResult, HistoryMatch, ReasonCode, TrustTier, validate_utc_iso
-from .db import article_id as phase1_article_id
 from .history import HistoryUnavailable, fetch_history_match, find_exact_identity, find_exact_title, find_exact_url, open_history
 from .models import Category
 from .policies import QueryPolicy, SourceMatch, SourcePolicy, classify_source
@@ -50,7 +49,18 @@ class _Context:
     identity: str | None
 
 
-def _result(ctx: _Context, decision: DecisionCode, reasons: tuple[ReasonCode, ...] | list[ReasonCode], trust: TrustTier, publication_time: str | None = None, match: HistoryMatch | None = None) -> FilterResult:
+def _result(
+    ctx: _Context,
+    decision: DecisionCode,
+    reasons: tuple[ReasonCode, ...] | list[ReasonCode],
+    trust: TrustTier,
+    publication_time: str | None = None,
+    match: HistoryMatch | None = None,
+    *,
+    date_evidence: str = "unknown",
+    recency_status: str = "unknown",
+    audit_only: bool = False,
+) -> FilterResult:
     return FilterResult(
         candidate=ctx.candidate,
         decision=decision,
@@ -60,6 +70,9 @@ def _result(ctx: _Context, decision: DecisionCode, reasons: tuple[ReasonCode, ..
         trust_tier=trust,
         evaluated_publication_time=publication_time,
         ordinal=ctx.ordinal,
+        date_evidence=date_evidence,
+        recency_status=recency_status,
+        audit_only=audit_only,
     )
 
 
@@ -82,46 +95,74 @@ def _context(candidate: CandidateArticle, ordinal: int, policy: QueryPolicy) -> 
         dummy = _Context(candidate, ordinal, policy, evaluated_at, supplied, normalized_title, normalized_snippet, None)
         return None, _result(dummy, DecisionCode.PENDING_INVALID_EVIDENCE, (ReasonCode.CANONICAL_MISMATCH,), TrustTier.UNKNOWN)
     canonical_url = supplied or original
-    identity = None
     if canonical_url is None:
-        identity = phase1_article_id(None, normalized_title, normalized_snippet, candidate.category.value, None)
+        dummy = _Context(candidate, ordinal, policy, evaluated_at, None, normalized_title, normalized_snippet, None)
+        return dummy, None
+    route_reason = non_article_url_reason(canonical_url)
+    if route_reason is not None:
+        dummy = _Context(candidate, ordinal, policy, evaluated_at, canonical_url, normalized_title, normalized_snippet, None)
+        return None, _result(
+            dummy,
+            DecisionCode.DROP_NON_ARTICLE_URL,
+            (ReasonCode.NON_ARTICLE_URL,),
+            TrustTier.UNKNOWN,
+        )
+    identity = None
     return _Context(candidate, ordinal, policy, evaluated_at, canonical_url, normalized_title, normalized_snippet, identity), None
 
 
-def _recency(ctx: _Context, trust: TrustTier) -> tuple[DecisionCode | None, tuple[ReasonCode, ...], str | None]:
+def _recency(
+    ctx: _Context,
+    trust: TrustTier,
+) -> tuple[DecisionCode | None, tuple[ReasonCode, ...], str | None, str, str]:
     c = ctx.candidate
     if c.published_evidence == "unparseable":
-        return DecisionCode.PENDING_INVALID_EVIDENCE, (ReasonCode.INVALID_DATE,), None
+        return DecisionCode.PENDING_INVALID_EVIDENCE, (ReasonCode.INVALID_DATE,), None, "unparseable", "invalid"
     if c.published_evidence == "missing" and c.published_at not in (None, ""):
-        return DecisionCode.PENDING_INVALID_EVIDENCE, (ReasonCode.INVALID_DATE,), None
+        return DecisionCode.PENDING_INVALID_EVIDENCE, (ReasonCode.INVALID_DATE,), None, "unparseable", "invalid"
 
     try:
         published = _parse_iso(c.published_at) if c.published_at else None
         observed = _parse_iso(c.observed_at) if c.observed_at else None
     except (TypeError, ValueError):
-        return DecisionCode.PENDING_INVALID_EVIDENCE, (ReasonCode.INVALID_DATE,), None
+        return DecisionCode.PENDING_INVALID_EVIDENCE, (ReasonCode.INVALID_DATE,), None, "unparseable", "invalid"
 
     evidence_reasons: list[ReasonCode] = []
     if published is None:
-        if observed is None:
-            return DecisionCode.PENDING_MISSING_EVIDENCE, (ReasonCode.MISSING_DATE,), None
-        if not ctx.policy.missing_date_fallback:
-            return DecisionCode.PENDING_MISSING_EVIDENCE, (ReasonCode.MISSING_DATE,), None
+        if observed is None or not ctx.policy.missing_date_fallback:
+            return DecisionCode.PENDING_MISSING_EVIDENCE, (ReasonCode.MISSING_DATE,), None, "missing", "missing"
         chosen = observed
+        date_evidence = "observed_fallback"
         evidence_reasons.append(ReasonCode.OK_OBSERVED_FALLBACK)
     else:
         chosen = published
+        date_evidence = "source" if c.published_evidence == "source" else "metadata"
 
     publication_time = _format_iso(chosen)
     future = chosen - ctx.evaluated_at
     if future > FUTURE_TOLERANCE:
-        return DecisionCode.PENDING_INVALID_EVIDENCE, (ReasonCode.FUTURE_DATE, ReasonCode.INVALID_DATE), publication_time
+        return (
+            DecisionCode.PENDING_INVALID_EVIDENCE,
+            (ReasonCode.FUTURE_DATE, ReasonCode.INVALID_DATE),
+            publication_time,
+            date_evidence,
+            "invalid",
+        )
     if future > timedelta(0):
         evidence_reasons.append(ReasonCode.FUTURE_DATE_CLAMPED)
+        recency_status = "future_clamped"
+    else:
+        recency_status = "fresh"
     compare_time = min(chosen, ctx.evaluated_at)
     if ctx.evaluated_at - compare_time > ctx.policy.recency:
-        return DecisionCode.DROP_STALE, _unique(evidence_reasons, (ReasonCode.STALE,)), publication_time
-    return None, tuple(evidence_reasons), publication_time
+        return (
+            DecisionCode.DROP_STALE,
+            _unique(evidence_reasons, (ReasonCode.STALE,)),
+            publication_time,
+            date_evidence,
+            "stale",
+        )
+    return None, tuple(evidence_reasons), publication_time, date_evidence, recency_status
 
 
 def evaluate_candidates(candidates: list[CandidateArticle], db_path: str, source_policy: SourcePolicy, query_policies: Mapping[Category, QueryPolicy]) -> tuple[FilterResult, ...]:
@@ -155,10 +196,21 @@ def evaluate_candidates(candidates: list[CandidateArticle], db_path: str, source
                 results.append(_result(ctx, DecisionCode.DROP_BLOCKED_SOURCE, _unique(source_reasons, (ReasonCode.OK_BLOCKED_SOURCE,)), source.tier))
                 continue
 
-            recency_decision, evidence_reasons, publication_time = _recency(ctx, source.tier)
+            recency_decision, evidence_reasons, publication_time, date_evidence, recency_status = _recency(ctx, source.tier)
             base_reasons = _unique(source_reasons, evidence_reasons)
             if recency_decision is not None:
-                results.append(_result(ctx, recency_decision, base_reasons, source.tier, publication_time))
+                results.append(
+                    _result(
+                        ctx,
+                        recency_decision,
+                        base_reasons,
+                        source.tier,
+                        publication_time,
+                        date_evidence=date_evidence,
+                        recency_status=recency_status,
+                        audit_only=ctx.canonical_url is None,
+                    )
+                )
                 continue
 
             signature = (ctx.normalized_title, ctx.normalized_snippet)
@@ -174,7 +226,18 @@ def evaluate_candidates(candidates: list[CandidateArticle], db_path: str, source
             if batch_match is not None:
                 _, winner_signature = batch_match
                 decision = DecisionCode.SUPPRESS_BATCH_EXACT if winner_signature == signature else DecisionCode.PENDING_POSSIBLE_UPDATE
-                results.append(_result(ctx, decision, _unique(base_reasons, (ReasonCode.WITHIN_BATCH_EXACT,)), source.tier, publication_time))
+                results.append(
+                    _result(
+                        ctx,
+                        decision,
+                        _unique(base_reasons, (ReasonCode.WITHIN_BATCH_EXACT,)),
+                        source.tier,
+                        publication_time,
+                        date_evidence=date_evidence,
+                        recency_status=recency_status,
+                        audit_only=ctx.canonical_url is None,
+                    )
+                )
                 continue
 
             if ctx.canonical_url is not None:
@@ -183,13 +246,38 @@ def evaluate_candidates(candidates: list[CandidateArticle], db_path: str, source
             else:
                 category_titles.setdefault((candidate.category, ctx.normalized_title), (ordinal, signature))
 
+            if ctx.canonical_url is None:
+                results.append(
+                    _result(
+                        ctx,
+                        DecisionCode.PENDING_MISSING_EVIDENCE,
+                        _unique(base_reasons, (ReasonCode.MISSING_URL,)),
+                        source.tier,
+                        publication_time,
+                        date_evidence=date_evidence,
+                        recency_status=recency_status,
+                        audit_only=True,
+                    )
+                )
+                continue
+
             if history is None and not history_failed:
                 try:
                     history = open_history(db_path)
                 except HistoryUnavailable:
                     history_failed = True
             if history_failed or history is None:
-                results.append(_result(ctx, DecisionCode.PENDING_HISTORY_UNAVAILABLE, _unique(base_reasons, (ReasonCode.HISTORY_UNAVAILABLE,)), source.tier, publication_time))
+                results.append(
+                    _result(
+                        ctx,
+                        DecisionCode.PENDING_HISTORY_UNAVAILABLE,
+                        _unique(base_reasons, (ReasonCode.HISTORY_UNAVAILABLE,)),
+                        source.tier,
+                        publication_time,
+                        date_evidence=date_evidence,
+                        recency_status=recency_status,
+                    )
+                )
                 continue
 
             try:
@@ -210,30 +298,94 @@ def evaluate_candidates(candidates: list[CandidateArticle], db_path: str, source
                     same_content = _normalize_text(latest.title) == ctx.normalized_title and _normalize_text(latest.snippet or "") == ctx.normalized_snippet
                     decision = DecisionCode.SUPPRESS_EXACT_URL if same_content else DecisionCode.PENDING_POSSIBLE_UPDATE
                     reason = ReasonCode.HISTORY_EXACT_URL if same_content else ReasonCode.HISTORY_URL_CHANGED_CONTENT
-                    results.append(_result(ctx, decision, _unique(base_reasons, (reason,)), source.tier, publication_time, latest))
+                    results.append(
+                        _result(
+                            ctx,
+                            decision,
+                            _unique(base_reasons, (reason,)),
+                            source.tier,
+                            publication_time,
+                            latest,
+                            date_evidence=date_evidence,
+                            recency_status=recency_status,
+                        )
+                    )
                     continue
 
                 if ctx.identity is not None:
                     identity_match = find_exact_identity(history, ctx.identity, candidate.category.value, candidate.evaluated_at, policy.exact_identity_lookback)
                     if identity_match is not None:
-                        results.append(_result(ctx, DecisionCode.SUPPRESS_EXACT_IDENTITY, _unique(base_reasons, (ReasonCode.HISTORY_EXACT_IDENTITY,)), source.tier, publication_time, identity_match))
+                        results.append(
+                            _result(
+                                ctx,
+                                DecisionCode.SUPPRESS_EXACT_IDENTITY,
+                                _unique(base_reasons, (ReasonCode.HISTORY_EXACT_IDENTITY,)),
+                                source.tier,
+                                publication_time,
+                                identity_match,
+                                date_evidence=date_evidence,
+                                recency_status=recency_status,
+                            )
+                        )
                         continue
 
                 title_match = find_exact_title(history, ctx.normalized_title, candidate.category.value, candidate.evaluated_at, policy.exact_title_lookback)
                 if title_match is not None:
                     same_snippet = _normalize_text(title_match.snippet or "") == ctx.normalized_snippet
                     if same_snippet:
-                        results.append(_result(ctx, DecisionCode.SUPPRESS_RECENT_TITLE, _unique(base_reasons, (ReasonCode.HISTORY_RECENT_TITLE,)), source.tier, publication_time, title_match))
+                        results.append(
+                            _result(
+                                ctx,
+                                DecisionCode.SUPPRESS_RECENT_TITLE,
+                                _unique(base_reasons, (ReasonCode.HISTORY_RECENT_TITLE,)),
+                                source.tier,
+                                publication_time,
+                                title_match,
+                                date_evidence=date_evidence,
+                                recency_status=recency_status,
+                            )
+                        )
                     else:
                         extra: tuple[ReasonCode, ...] = (ReasonCode.OK_TITLE_ONLY_LOW_CONFIDENCE,) if title_match.identity_basis == "title_only" else ()
-                        results.append(_result(ctx, DecisionCode.PENDING_POSSIBLE_UPDATE, _unique(base_reasons, extra, (ReasonCode.HISTORY_TITLE_CHANGED_SNIPPET,)), source.tier, publication_time, title_match))
+                        results.append(
+                            _result(
+                                ctx,
+                                DecisionCode.PENDING_POSSIBLE_UPDATE,
+                                _unique(base_reasons, extra, (ReasonCode.HISTORY_TITLE_CHANGED_SNIPPET,)),
+                                source.tier,
+                                publication_time,
+                                title_match,
+                                date_evidence=date_evidence,
+                                recency_status=recency_status,
+                            )
+                        )
                     continue
             except HistoryUnavailable:
                 history_failed = True
-                results.append(_result(ctx, DecisionCode.PENDING_HISTORY_UNAVAILABLE, _unique(base_reasons, (ReasonCode.HISTORY_UNAVAILABLE,)), source.tier, publication_time))
+                results.append(
+                    _result(
+                        ctx,
+                        DecisionCode.PENDING_HISTORY_UNAVAILABLE,
+                        _unique(base_reasons, (ReasonCode.HISTORY_UNAVAILABLE,)),
+                        source.tier,
+                        publication_time,
+                        date_evidence=date_evidence,
+                        recency_status=recency_status,
+                    )
+                )
                 continue
 
-            results.append(_result(ctx, DecisionCode.KEEP, base_reasons, source.tier, publication_time))
+            results.append(
+                _result(
+                    ctx,
+                    DecisionCode.KEEP,
+                    base_reasons,
+                    source.tier,
+                    publication_time,
+                    date_evidence=date_evidence,
+                    recency_status=recency_status,
+                )
+            )
     finally:
         if history is not None:
             history.close()

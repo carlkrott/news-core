@@ -867,7 +867,7 @@ class TestRssMissingDateReasons(unittest.IsolatedAsyncioTestCase):
         )
         result = await adapter.fetch_query("test", categories=(), retrieved_at=RETRIEVED_AT)
         self.assertIsNone(result.error)
-        # No publishedDate means published_at is None and publication_evidence is None
+        # No publishedDate means published_at is None and evidence is explicit.
         item = result.items[0]
         self.assertIsNone(item.published_at)
 
@@ -1408,7 +1408,7 @@ class TestParentRegressionContracts(unittest.IsolatedAsyncioTestCase):
         )
         item = result.items[0]
         self.assertIsNone(item.published_at)
-        self.assertIsNone(item.publication_evidence)
+        self.assertEqual(item.publication_evidence, "unparseable")
         self.assertEqual(item.unknown_date_reason, "unparseable-published-date")
 
     async def test_unparseable_rss_date_is_not_persisted_as_timestamp(self) -> None:
@@ -1432,7 +1432,7 @@ class TestParentRegressionContracts(unittest.IsolatedAsyncioTestCase):
         )
         item = result.items[0]
         self.assertIsNone(item.published_at)
-        self.assertIsNone(item.publication_evidence)
+        self.assertEqual(item.publication_evidence, "unparseable")
         self.assertEqual(item.unknown_date_reason, "unparseable-published-date")
 
     async def test_namespaced_rdf_items_are_supported(self) -> None:

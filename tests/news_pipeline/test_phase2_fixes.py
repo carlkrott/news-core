@@ -376,7 +376,8 @@ class CanonicalConsistencyTests(_Base):
 
 # ---------------------------------------------------------------------------
 # Fix #6 — Deterministic within-batch: URL-less same-title + changed snippet
-# → PENDING_POSSIBLE_UPDATE; cross-category URL per policy.
+# → PENDING_POSSIBLE_UPDATE after the first audit-only missing-URL result;
+# cross-category URL per policy.
 # ---------------------------------------------------------------------------
 
 
@@ -395,7 +396,8 @@ class WithinBatchTests(_Base):
             snippet="different body",
         )
         r = evaluate_candidates([c1, c2], self.db_path, self.source, self.policies)
-        self.assertEqual(r[0].decision, DecisionCode.KEEP)
+        self.assertEqual(r[0].decision, DecisionCode.PENDING_MISSING_EVIDENCE)
+        self.assertTrue(r[0].audit_only)
         self.assertEqual(r[1].decision, DecisionCode.PENDING_POSSIBLE_UPDATE)
         self.assertEqual(r[1].ordinal, 2)
 
@@ -403,7 +405,8 @@ class WithinBatchTests(_Base):
         c1 = _candidate(candidate_id="c1", original_url=None, canonical_url=None, snippet="body")
         c2 = _candidate(candidate_id="c2", original_url=None, canonical_url=None, snippet="body")
         r = evaluate_candidates([c1, c2], self.db_path, self.source, self.policies)
-        self.assertEqual(r[0].decision, DecisionCode.KEEP)
+        self.assertEqual(r[0].decision, DecisionCode.PENDING_MISSING_EVIDENCE)
+        self.assertTrue(r[0].audit_only)
         self.assertEqual(r[1].decision, DecisionCode.SUPPRESS_BATCH_EXACT)
 
     def test_cross_category_url_does_not_starve_when_policy_disables(self):

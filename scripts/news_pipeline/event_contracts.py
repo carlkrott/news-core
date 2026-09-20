@@ -107,6 +107,10 @@ _PHASE2_TO_SEMANTIC: dict[Phase2DecisionCode, tuple[SemanticDecision, SemanticRe
         SemanticDecision.bypass_phase2_terminal,
         SemanticReasonCode.PHASE2_SUPPRESSED_OR_DROPPED,
     ),
+    Phase2DecisionCode.DROP_NON_ARTICLE_URL: (
+        SemanticDecision.bypass_phase2_terminal,
+        SemanticReasonCode.PHASE2_SUPPRESSED_OR_DROPPED,
+    ),
     Phase2DecisionCode.PENDING_MISSING_EVIDENCE: (
         SemanticDecision.pending_review,
         SemanticReasonCode.PHASE2_MISSING_EVIDENCE,

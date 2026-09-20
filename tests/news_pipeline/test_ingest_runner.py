@@ -27,8 +27,8 @@ from news_pipeline.schema_v4 import migrate_v4
 from news_pipeline.source_registry import load_registry
 
 ROOT = Path(__file__).resolve().parents[2]
-TOPICS = ROOT / "config/news-topics.toml"
-POLICY = ROOT / "config/news-policy.toml"
+TOPICS = ROOT / "config/news-topics.example.toml"
+POLICY = ROOT / "config/news-policy.example.toml"
 RUN_AT = "2026-01-01T00:00:00Z"
 FINISHED_AT = "2026-01-01T00:00:10Z"
 
@@ -73,7 +73,7 @@ def write_sources(path: Path, sources: list[dict]) -> Path:
             }
         )
     sources.sort(key=lambda configured_source: configured_source["source_id"])
-    lines = ["version = 1", ""]
+    lines = ["version = 2", ""]
     for source in sources:
         lines.extend(
             [

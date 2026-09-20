@@ -4,11 +4,11 @@ from __future__ import annotations
 import json
 import math
 from json import JSONDecoder
-from typing import Protocol, Sequence
+from typing import Protocol, Sequence, cast
 
 from .adjudication import classify_pair
 from .clustering import cluster_id_for_topic, cluster_id_for_url, score_pair, select_history_matches
-from .contracts import DecisionCode as Phase2DecisionCode, HistoryMatch
+from .contracts import CandidateArticle, DecisionCode as Phase2DecisionCode, FilterResult, HistoryMatch
 from .event_contracts import (
     AdjudicationResult,
     CachedModelOutcome,
@@ -190,7 +190,7 @@ def evaluate_semantic_updates(candidates: Sequence[EventCandidate], history: Seq
     cache: dict[tuple[str, str], CachedModelOutcome] = {}
     calls = 0
     results = []
-    terminal = {Phase2DecisionCode.SUPPRESS_BATCH_EXACT, Phase2DecisionCode.SUPPRESS_EXACT_URL, Phase2DecisionCode.SUPPRESS_EXACT_IDENTITY, Phase2DecisionCode.SUPPRESS_RECENT_TITLE, Phase2DecisionCode.DROP_STALE, Phase2DecisionCode.DROP_BLOCKED_SOURCE}
+    terminal = {Phase2DecisionCode.SUPPRESS_BATCH_EXACT, Phase2DecisionCode.SUPPRESS_EXACT_URL, Phase2DecisionCode.SUPPRESS_EXACT_IDENTITY, Phase2DecisionCode.SUPPRESS_RECENT_TITLE, Phase2DecisionCode.DROP_STALE, Phase2DecisionCode.DROP_BLOCKED_SOURCE, Phase2DecisionCode.DROP_NON_ARTICLE_URL}
     passthrough = {Phase2DecisionCode.PENDING_MISSING_EVIDENCE: SemanticReasonCode.PHASE2_MISSING_EVIDENCE, Phase2DecisionCode.PENDING_INVALID_EVIDENCE: SemanticReasonCode.PHASE2_INVALID_EVIDENCE, Phase2DecisionCode.PENDING_HISTORY_UNAVAILABLE: SemanticReasonCode.PHASE2_HISTORY_UNAVAILABLE}
     for event in events:
         candidate = event.candidate
@@ -200,6 +200,11 @@ def evaluate_semantic_updates(candidates: Sequence[EventCandidate], history: Seq
             continue
         if phase2 in passthrough:
             results.append(_result(event, SemanticDecision.pending_review, (passthrough[phase2],), matched_candidates=(candidate.candidate_id,), matched_history=event.filter_result.matched_article_ids, matched_observations=event.filter_result.matched_observation_ids))
+            continue
+        filter_result = cast(FilterResult, event.filter_result)
+        candidate_article = cast(CandidateArticle, candidate)
+        if filter_result.audit_only:
+            results.append(_result(event, SemanticDecision.pending_review, (SemanticReasonCode.PHASE2_MISSING_EVIDENCE,), matched_candidates=(candidate_article.candidate_id,), matched_history=filter_result.matched_article_ids, matched_observations=filter_result.matched_observation_ids))
             continue
         referenced = tuple(dict.fromkeys(event.filter_result.matched_article_ids))
         if phase2 is Phase2DecisionCode.PENDING_POSSIBLE_UPDATE:
