@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 from json import JSONDecoder
 from typing import Protocol, Sequence, cast
 
 from .adjudication import classify_pair
-from .clustering import cluster_id_for_topic, cluster_id_for_url, score_pair, select_history_matches
+from .clustering import event_id_for_match, event_version_for_match, score_pair, select_history_matches
 from .contracts import CandidateArticle, DecisionCode as Phase2DecisionCode, FilterResult, HistoryMatch
 from .event_contracts import (
     AdjudicationResult,
@@ -23,6 +24,7 @@ from .event_contracts import (
     SemanticReasonCode,
     ordered_unique_reasons,
 )
+from .models import Subject, assign_primary_subject, subject_for_category
 
 FIXED_MODEL_INSTRUCTION = (
     "Compare the newer candidate article with the older history article. "
@@ -133,8 +135,37 @@ def parse_model_response(raw: str) -> ParsedModelVerdict:
     return ParsedModelVerdict(ModelDecision(decision), confidence, reason, tuple(facts))
 
 
-def _result(event, decision, semantic_reasons, cluster_id=None, matched_candidates=(), matched_history=(), matched_observations=(), fact_deltas=(), model_used=False, confidence=None, error_category=None):
-    return AdjudicationResult(candidate_id=event.candidate.candidate_id, semantic_decision=decision, phase2_decision=event.filter_result.decision, phase2_reasons=event.filter_result.reasons, semantic_reasons=ordered_unique_reasons(tuple(semantic_reasons)), cluster_id=cluster_id, matched_candidate_ids=tuple(matched_candidates), matched_history_ids=tuple(matched_history), matched_observation_ids=tuple(matched_observations), fact_deltas=tuple(fact_deltas), model_used=model_used, model_confidence=confidence, model_error_category=error_category, ordinal=event.filter_result.ordinal, source_ordinal=event.filter_result.ordinal)
+def _result(event, decision, semantic_reasons, cluster_id=None, matched_candidates=(), matched_history=(), matched_observations=(), fact_deltas=(), model_used=False, confidence=None, error_category=None, *, event_version=None, subject_id=None, subject_suppressed=False):
+    return AdjudicationResult(candidate_id=event.candidate.candidate_id, semantic_decision=decision, phase2_decision=event.filter_result.decision, phase2_reasons=event.filter_result.reasons, semantic_reasons=ordered_unique_reasons(tuple(semantic_reasons)), cluster_id=cluster_id, matched_candidate_ids=tuple(matched_candidates), matched_history_ids=tuple(matched_history), matched_observation_ids=tuple(matched_observations), fact_deltas=tuple(fact_deltas), model_used=model_used, model_confidence=confidence, model_error_category=error_category, ordinal=event.filter_result.ordinal, source_ordinal=event.filter_result.ordinal, event_version=event_version, subject_id=subject_id, subject_suppressed=subject_suppressed)
+
+
+def _apply_subject_collisions(results: Sequence[AdjudicationResult]) -> tuple[AdjudicationResult, ...]:
+    grouped: dict[str, list[int]] = {}
+    for index, result in enumerate(results):
+        if result.event_id is None or result.subject_id is None:
+            continue
+        if result.semantic_decision not in (SemanticDecision.distinct_event, SemanticDecision.material_update):
+            continue
+        grouped.setdefault(result.event_id, []).append(index)
+    output = list(results)
+    for indexes in grouped.values():
+        subjects = tuple(dict.fromkeys(Subject(results[index].subject_id) for index in indexes))
+        if len(subjects) < 2:
+            continue
+        route = assign_primary_subject(subjects)
+        assert route.primary_subject is not None
+        for index in indexes:
+            result = output[index]
+            if result.subject_id == route.primary_subject.value:
+                continue
+            output[index] = replace(
+                result,
+                semantic_reasons=ordered_unique_reasons(
+                    result.semantic_reasons + (SemanticReasonCode.SUBJECT_COLLISION_SUPPRESSED,)
+                ),
+                subject_suppressed=True,
+            )
+    return tuple(output)
 
 
 def _model_outcome(model, candidate, history, calls, max_calls, cache, key):
@@ -194,6 +225,7 @@ def evaluate_semantic_updates(candidates: Sequence[EventCandidate], history: Seq
     passthrough = {Phase2DecisionCode.PENDING_MISSING_EVIDENCE: SemanticReasonCode.PHASE2_MISSING_EVIDENCE, Phase2DecisionCode.PENDING_INVALID_EVIDENCE: SemanticReasonCode.PHASE2_INVALID_EVIDENCE, Phase2DecisionCode.PENDING_HISTORY_UNAVAILABLE: SemanticReasonCode.PHASE2_HISTORY_UNAVAILABLE}
     for event in events:
         candidate = event.candidate
+        candidate_article = cast(CandidateArticle, candidate)
         phase2 = event.filter_result.decision
         if phase2 in terminal:
             results.append(_result(event, SemanticDecision.bypass_phase2_terminal, (SemanticReasonCode.PHASE2_SUPPRESSED_OR_DROPPED,), matched_candidates=(candidate.candidate_id,), matched_history=event.filter_result.matched_article_ids, matched_observations=event.filter_result.matched_observation_ids))
@@ -239,18 +271,32 @@ def evaluate_semantic_updates(candidates: Sequence[EventCandidate], history: Seq
         else:
             selected = list(select_history_matches(event, history_rows))
         if not selected:
-            results.append(_result(event, SemanticDecision.distinct_event, (SemanticReasonCode.DISTINCT_EVENT,)))
+            results.append(
+                _result(
+                    event,
+                    SemanticDecision.distinct_event,
+                    (SemanticReasonCode.DISTINCT_EVENT,),
+                    event_id_for_match(candidate_article),
+                    subject_id=subject_for_category(candidate_article.category).value,
+                    event_version=1,
+                )
+            )
             continue
         scored = selected[0]
-        verdict = classify_pair(candidate, scored.match, scored)
+        scored_match = cast(HistoryMatch, scored.match)
+        verdict = classify_pair(candidate, scored_match, scored)
         matched_history = tuple(sorted({row.match.article_id for row in selected}))
         matched_obs = tuple(sorted({row.match.observation_id for row in selected}))
-        cluster = cluster_id_for_url(candidate.canonical_url) if candidate.canonical_url and scored.exact_url else cluster_id_for_topic(candidate.category, scored.match.article_id)
+        cluster = event_id_for_match(candidate_article, scored_match)
+        current_version = event_version_for_match(scored_match)
+        subject_id = subject_for_category(candidate_article.category).value
         if verdict.decision is InternalRuleDecision.model_required:
             key = (candidate.candidate_id, scored.match.article_id)
             outcome, calls = _model_outcome(model, candidate, scored.match, calls, max_model_calls, cache, key)
-            results.append(_result(event, outcome.final_decision, outcome.reasons, cluster, (candidate.candidate_id,), matched_history, matched_obs, verdict.fact_deltas, outcome.error_category is not None or outcome.confidence is not None, outcome.confidence, outcome.error_category))
+            if outcome.final_decision is SemanticDecision.material_update and not verdict.fact_deltas:
+                outcome = CachedModelOutcome(SemanticDecision.pending_review, (SemanticReasonCode.UNGROUNDED_MATERIAL_UPDATE,), outcome.confidence, None, ())
+            results.append(_result(event, outcome.final_decision, outcome.reasons, cluster, (candidate.candidate_id,), matched_history, matched_obs, verdict.fact_deltas, outcome.error_category is not None or outcome.confidence is not None, outcome.confidence, outcome.error_category, event_version=current_version + (1 if outcome.final_decision is SemanticDecision.material_update else 0), subject_id=subject_id))
         else:
             final = SemanticDecision.material_update if verdict.decision is InternalRuleDecision.material_update else SemanticDecision.rewrite
-            results.append(_result(event, final, verdict.reasons, cluster, (candidate.candidate_id,), matched_history, matched_obs, verdict.fact_deltas))
-    return tuple(results)
+            results.append(_result(event, final, verdict.reasons, cluster, (candidate.candidate_id,), matched_history, matched_obs, verdict.fact_deltas, event_version=current_version + (1 if final is SemanticDecision.material_update else 0), subject_id=subject_id))
+    return _apply_subject_collisions(tuple(results))

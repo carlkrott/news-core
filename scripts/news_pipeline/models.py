@@ -73,6 +73,84 @@ class SubjectAssignment:
             raise ValueError("subject assignment reason must be non-empty")
 
 
+@dataclass(frozen=True, slots=True)
+class SubjectCollision:
+    """One event routed to one primary subject with audit-only suppressions."""
+
+    primary_subject: Subject | None
+    suppressed_subjects: tuple[Subject, ...]
+    decision: SubjectDecision
+    reason: str
+
+    def __post_init__(self) -> None:
+        if type(self.suppressed_subjects) is not tuple:
+            raise ValueError("suppressed_subjects must be a tuple")
+        if len(self.suppressed_subjects) != len(set(self.suppressed_subjects)):
+            raise ValueError("suppressed_subjects must be unique")
+        if any(not isinstance(subject, Subject) for subject in self.suppressed_subjects):
+            raise ValueError("suppressed_subjects must contain Subject values")
+        if self.decision is SubjectDecision.ASSIGNED:
+            if self.primary_subject is None:
+                raise ValueError("assigned collisions require a primary subject")
+            if self.primary_subject in self.suppressed_subjects:
+                raise ValueError("primary subject cannot also be suppressed")
+        elif self.primary_subject is not None or self.suppressed_subjects:
+            raise ValueError("pending collisions cannot select subjects")
+        if type(self.reason) is not str or not self.reason.strip():
+            raise ValueError("subject collision reason must be non-empty")
+
+
+_SUBJECT_PRIORITY = (
+    Subject.AUDIO_ENGINEERING,
+    Subject.PROFESSIONAL_AV,
+    Subject.AI,
+    Subject.WORLD,
+    Subject.HARDWARE,
+    Subject.FANTASY_NOVEL,
+    Subject.OUR_SETUP,
+)
+
+
+def assign_primary_subject(
+    subjects: tuple[Subject | str, ...],
+    *,
+    preferred_subject: Subject | str | None = None,
+) -> SubjectCollision:
+    """Choose one deterministic primary subject for a cross-lane event.
+
+    ``preferred_subject`` is the grounded product/use-case route when one is
+    available. Without it, the fixed subject priority is used so the same
+    event cannot enter two subject prompts. Empty input and unknown values fail
+    closed as ``pending_subject_review``.
+    """
+    if type(subjects) is not tuple or len(subjects) != len(set(subjects)):
+        raise ValueError("subjects must be a unique tuple")
+    try:
+        normalized = tuple(
+            value if isinstance(value, Subject) else Subject(value)
+            for value in subjects
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"unknown subjects: {subjects!r}") from exc
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("subjects must be unique after normalization")
+    if not normalized:
+        return SubjectCollision(None, (), SubjectDecision.PENDING_SUBJECT_REVIEW, "missing_subject")
+    if preferred_subject is not None:
+        try:
+            primary = preferred_subject if isinstance(preferred_subject, Subject) else Subject(preferred_subject)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"unknown preferred subject: {preferred_subject!r}") from exc
+        if primary not in normalized:
+            raise ValueError("preferred_subject must be present in subjects")
+        reason = "grounded_preferred_subject" if len(normalized) > 1 else "single_subject"
+    else:
+        primary = next(subject for subject in _SUBJECT_PRIORITY if subject in normalized)
+        reason = "deterministic_primary_subject" if len(normalized) > 1 else "single_subject"
+    suppressed = tuple(subject for subject in _SUBJECT_PRIORITY if subject in normalized and subject != primary)
+    return SubjectCollision(primary, suppressed, SubjectDecision.ASSIGNED, reason)
+
+
 def assign_subject(categories: tuple[str, ...]) -> SubjectAssignment:
     """Assign one subject or fail closed when category evidence is ambiguous."""
     if type(categories) is not tuple or len(categories) != len(set(categories)):

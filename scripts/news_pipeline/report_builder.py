@@ -13,8 +13,8 @@ from .briefing_contracts import BriefingInput, compute_morning_window
 from .briefing_ledger import BriefingLedger, normalize_canonical_payload
 from .briefing_shadow_hook import run_shadow_briefing
 from .briefing_renderer import RenderResult
-from .event_contracts import AdjudicationResult, EventCandidate, SemanticDecision, SemanticReasonCode
-from .models import Category
+from .event_contracts import AdjudicationResult, EventCandidate, SemanticDecision, SemanticReasonCode, event_version_identity
+from .models import Category, Subject, subject_for_category
 from .contracts import CandidateArticle, FilterResult, DecisionCode, ReasonCode, TrustTier
 from .policies import QueryPolicy
 from .report_artifacts import ArtifactMismatch, ArtifactRoot, ReportArtifacts, ArtifactResult, compute_artifacts, verify_artifacts
@@ -96,7 +96,7 @@ def _briefing_input(event_id: str, version: int, summary: str, category: Categor
     ec = EventCandidate(candidate=article, filter_result=filtered, query_policy=_policy(category))
     decision = SemanticDecision.distinct_event if version == 1 else SemanticDecision.material_update
     reason = (SemanticReasonCode.DISTINCT_EVENT,) if version == 1 else (SemanticReasonCode.NUMERIC_REVISION,)
-    adjudication = AdjudicationResult(candidate_id=candidate_id, semantic_decision=decision, phase2_decision=DecisionCode.KEEP, phase2_reasons=(ReasonCode.OK_KEEP,), semantic_reasons=reason, cluster_id=None, matched_candidate_ids=(candidate_id,), matched_history_ids=(), matched_observation_ids=(), fact_deltas=(), model_used=False, model_confidence=None, model_error_category=None, ordinal=0)
+    adjudication = AdjudicationResult(candidate_id=candidate_id, semantic_decision=decision, phase2_decision=DecisionCode.KEEP, phase2_reasons=(ReasonCode.OK_KEEP,), semantic_reasons=reason, cluster_id=event_id, matched_candidate_ids=(candidate_id,), matched_history_ids=(), matched_observation_ids=(), fact_deltas=(), model_used=False, model_confidence=None, model_error_category=None, ordinal=0, event_version=version, subject_id=subject_for_category(category).value)
     return BriefingInput(event_candidate=ec, adjudication=adjudication)
 
 
@@ -194,8 +194,15 @@ def _items_from_links(con: sqlite3.Connection, report_id: str) -> list[tuple[str
         ORDER BY re.sort_order,re.event_id,re.event_version""", (report_id,)).fetchall()
     checked: list[tuple[str, int, str, str, str, str]] = []
     for raw in rows:
-        _validated_event_status(raw[6], raw[7])
-        checked.append(_validated_event_row(tuple(raw[:6])))
+        state, superseded_at = _validated_event_status(raw[6], raw[7])
+        row = _validated_event_row(tuple(raw[:6]))
+        if state != "verified" or superseded_at is not None:
+            continue
+        if row[5].strip().casefold() == "retraction":
+            continue
+        if not _has_canonical_source_url(con, row[0], row[1]):
+            continue
+        checked.append(row)
     return checked
 
 
@@ -401,10 +408,15 @@ def _recover_completed_events(
               AND si.canonical_url IS NOT NULL
               AND trim(si.canonical_url) <> ''
         )""").fetchall():
-        cid = _candidate_id(raw[0], raw[1])
-        if cid in candidates:
-            raise ArtifactMismatch(f"ambiguous event-version candidate ID: {cid!r}")
-        candidates[cid] = tuple(raw)
+        legacy_id = _candidate_id(raw[0], raw[1])
+        ids = (legacy_id,) + tuple(
+            event_version_identity(subject.value, raw[0], raw[1])
+            for subject in Subject
+        )
+        for cid in ids:
+            if cid in candidates:
+                raise ArtifactMismatch(f"ambiguous event-version candidate ID: {cid!r}")
+            candidates[cid] = tuple(raw)
     recovered: list[tuple[str, int, str, str, str, str]] = []
     for expected_ordinal, ledger_row in enumerate(ledger_rows):
         candidate_id, event_status, payload_json, ordinal = ledger_row
@@ -416,6 +428,20 @@ def _recover_completed_events(
         event = _validated_event_row(raw[:6])
         event_id, version, summary, category, valid_from, change_reason = event
         _validated_event_status(raw[6], raw[7])
+        if type(payload_json) is not str:
+            raise ArtifactMismatch(f"shadow payload is not JSON text: {candidate_id!r}")
+        try:
+            first_seen_payload = json.loads(payload_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ArtifactMismatch(f"shadow payload is invalid JSON: {candidate_id!r}") from exc
+        if not isinstance(first_seen_payload, dict) or type(first_seen_payload.get("category")) is not str:
+            raise ArtifactMismatch(f"shadow payload lacks a valid primary category: {candidate_id!r}")
+        try:
+            Category(first_seen_payload["category"])
+        except ValueError as exc:
+            raise ArtifactMismatch(f"shadow payload has an invalid primary category: {candidate_id!r}") from exc
+        category = first_seen_payload["category"]
+        event = (event_id, version, summary, category, valid_from, change_reason)
         if (
             raw[6] != "verified"
             or raw[7] is not None
@@ -424,14 +450,26 @@ def _recover_completed_events(
         ):
             raise ArtifactMismatch(f"shadow candidate is no longer report-eligible: {candidate_id!r}")
         decision = "distinct_event" if version == 1 else "material_update"
-        expected_payload = normalize_canonical_payload({
+        payload = {
             "candidate_id": candidate_id,
             "category": category,
             "decision": decision,
             "title": summary[:256],
             "summary": summary[:2048],
-        })
-        if type(payload_json) is not str or payload_json.encode("utf-8") != expected_payload:
+        }
+        if candidate_id != _candidate_id(event_id, version):
+            subject_id = next(
+                subject.value
+                for subject in Subject
+                if candidate_id == event_version_identity(subject.value, event_id, version)
+            )
+            payload.update({
+                "subject_id": subject_id,
+                "event_id": event_id,
+                "event_version": version,
+            })
+        expected_payload = normalize_canonical_payload(payload)
+        if payload_json.encode("utf-8") != expected_payload:
             raise ArtifactMismatch(f"shadow payload conflicts with event row: {candidate_id!r}")
         recovered.append(event)
     return recovered

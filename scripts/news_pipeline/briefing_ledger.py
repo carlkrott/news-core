@@ -32,10 +32,10 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union, cast
 
 from .contracts import validate_utc_iso
-from .event_contracts import SemanticDecision
+from .event_contracts import SemanticDecision, event_version_identity
 from .models import Category
 
 
@@ -106,6 +106,16 @@ def _check_candidate_id(value: object) -> str:
     return value
 
 
+def _check_event_version(value: object) -> int:
+    if type(value) is not int or value <= 0:
+        raise LedgerContractError("event_version must be a positive int")
+    return value
+
+
+# Short aliases used by callers that describe the same contract as an event
+# identity rather than a delivery identity.
+event_identity = event_version_identity
+briefing_identity = event_version_identity
 def _validate_run_id(value: object, field: str = "run_id") -> str:
     """Validate ``run_id``: non-empty str, 1..256 code points."""
     if not isinstance(value, str):
@@ -177,13 +187,51 @@ class ShadowEvent:
     ``distinct_event`` / ``material_update`` per the addendum.
     """
 
-    candidate_id: str
-    category: Category
-    decision: SemanticDecision
-    payload_json: bytes
-    recorded_at_utc: str
+    candidate_id: str = ""
+    category: Category | None = None
+    decision: SemanticDecision | None = None
+    payload_json: bytes = b""
+    recorded_at_utc: str = ""
+    subject_id: str | None = None
+    event_id: str | None = None
+    event_version: int | None = None
 
     def __post_init__(self) -> None:
+        identity_fields = (self.subject_id, self.event_id, self.event_version)
+        if self.candidate_id == "":
+            if any(value is None for value in identity_fields):
+                raise LedgerContractError(
+                    "candidate_id or complete subject_id/event_id/event_version is required"
+                )
+            object.__setattr__(
+                self,
+                "candidate_id",
+                event_version_identity(
+                    cast(str, self.subject_id),
+                    cast(str, self.event_id),
+                    cast(int, self.event_version),
+                ),
+            )
+        elif any(value is not None for value in identity_fields):
+            if any(value is None for value in identity_fields):
+                raise LedgerContractError(
+                    "subject_id, event_id, and event_version must be supplied together"
+                )
+            expected = event_version_identity(
+                cast(str, self.subject_id),
+                cast(str, self.event_id),
+                cast(int, self.event_version),
+            )
+            if self.candidate_id != expected:
+                raise LedgerContractError(
+                    "candidate_id does not match subject/event/version identity"
+                )
+        if self.subject_id is not None:
+            _check_candidate_id(self.subject_id)
+        if self.event_id is not None:
+            _check_candidate_id(self.event_id)
+        if self.event_version is not None:
+            _check_event_version(self.event_version)
         _check_candidate_id(self.candidate_id)
         if not isinstance(self.category, Category):
             raise LedgerContractError(

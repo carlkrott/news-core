@@ -243,3 +243,23 @@ Report selection requires a verified event to have at least one non-empty
 canonical source URL through its event-claim provenance chain.  URL-incomplete
 events are excluded before briefing and artifact linkage; delivery remains
 disabled.
+
+## 13. Event novelty and subject collision handling
+
+Exact canonical-URL and title/identity history checks remain fast admission
+prefilters.  Once an event relationship is known, the persisted event ID and
+positive event version are the durable novelty authority.  A rewrite with no
+grounded fact or state delta is suppressed and cannot append a new event
+version.  A `material_update` must carry typed or structurally equivalent
+grounded `FactDelta` records before the event store accepts the next version;
+the expected version is fenced against the current durable version.
+
+Briefing seen identity is a bounded SHA-256 key over the canonical
+`(subject,event,version)` tuple and uses the existing
+`shadow_briefing_seen` ledger; the canonical subject, event, and version remain
+in the payload for audit and recovery.  The first payload remains
+authoritative; a later payload for the same identity is retained in the
+run-event audit trail but is not delivered again.  Cross-lane events receive
+one deterministic primary subject and explicit secondary-subject suppression
+reasons, preventing the same event-version from entering multiple subject
+briefings.

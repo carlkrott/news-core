@@ -155,7 +155,8 @@ class TestBatchAPI(unittest.TestCase):
         a = evaluate_semantic_updates((_event(c),), (h,), model, 1)
         b = evaluate_semantic_updates((_event(c),), (h,), model, 1)
         self.assertEqual(a, b)
-        self.assertEqual([r.semantic_decision for r in a], [SemanticDecision.material_update])
+        self.assertEqual([r.semantic_decision for r in a], [SemanticDecision.pending_review])
+        self.assertEqual(a[0].semantic_reasons, (SemanticReasonCode.UNGROUNDED_MATERIAL_UPDATE,))
 
     def test_programmer_exception_surfaces_and_history_unchanged(self):
         c = _candidate("c1", title="Product pricing update", snippet="The prices are $20 and $30")
@@ -342,7 +343,8 @@ class TestBatchAPI(unittest.TestCase):
         out = evaluate_semantic_updates((e,), (h1, h2), Model(), 4)
         self.assertEqual(len(model_calls), 1)
         self.assertEqual(model_calls[0], "https://example.com/article")
-        self.assertEqual(out[0].semantic_decision, SemanticDecision.material_update)
+        self.assertEqual(out[0].semantic_decision, SemanticDecision.pending_review)
+        self.assertEqual(out[0].semantic_reasons, (SemanticReasonCode.UNGROUNDED_MATERIAL_UPDATE,))
 
     def test_F3_preserves_all_resolved_observation_ids_in_pending(self):
             c = _candidate("c1", title="Product pricing update", snippet="The prices are $20 and $30")

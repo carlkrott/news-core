@@ -12,6 +12,9 @@ mapping Phase 2 outputs to Phase 3 ``SemanticDecision`` /
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from dataclasses import InitVar, dataclass
 from decimal import Decimal
 from enum import Enum
@@ -23,7 +26,26 @@ from .models import Category
 from .policies import QueryPolicy
 
 
+_IDENTITY_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+
+
+def event_version_identity(subject_id: str, event_id: str, event_version: int) -> str:
+    """Return a bounded, unambiguous key for one subject/event/version."""
+    for name, value in (("subject_id", subject_id), ("event_id", event_id)):
+        if type(value) is not str or not value or len(value) > 256 or _IDENTITY_CONTROL_RE.search(value):
+            raise ValueError(f"{name} must be a clean non-empty string of at most 256 characters")
+    if type(event_version) is not int or event_version <= 0:
+        raise ValueError("event_version must be a positive int")
+    canonical = json.dumps(
+        (subject_id, event_id, event_version),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "evv1:" + hashlib.sha256(canonical).hexdigest()
+
+
 class FactKind(str, Enum):
+    STATE = "state"
     PRICE = "price"
     VERSION = "version"
     DATE = "date"
@@ -74,6 +96,8 @@ class SemanticReasonCode(str, Enum):
     TRANSPORT_ERROR = "TRANSPORT_ERROR"
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
     LOW_CONFIDENCE = "LOW_CONFIDENCE"
+    UNGROUNDED_MATERIAL_UPDATE = "UNGROUNDED_MATERIAL_UPDATE"
+    SUBJECT_COLLISION_SUPPRESSED = "SUBJECT_COLLISION_SUPPRESSED"
     DISTINCT_EVENT = "DISTINCT_EVENT"
 
 
@@ -368,6 +392,9 @@ class AdjudicationResult:
     model_error_category: Optional[ModelErrorCategory]
     ordinal: int
     source_ordinal: InitVar[int | None] = None
+    event_version: int | None = None
+    subject_id: str | None = None
+    subject_suppressed: bool = False
 
     def __post_init__(self, source_ordinal: int | None) -> None:
         import math
@@ -385,6 +412,18 @@ class AdjudicationResult:
             raise ValueError("AdjudicationResult.model_used must be bool")
         if not self.model_used and self.model_confidence is not None:
             raise ValueError("model_used=False requires model_confidence=None")
+        if self.event_version is not None and (
+            type(self.event_version) is not int or self.event_version <= 0
+        ):
+            raise ValueError("AdjudicationResult.event_version must be a positive int or None")
+        if self.subject_id is not None and (
+            type(self.subject_id) is not str or not self.subject_id.strip()
+        ):
+            raise ValueError("AdjudicationResult.subject_id must be a non-empty string or None")
+        if type(self.subject_suppressed) is not bool:
+            raise ValueError("AdjudicationResult.subject_suppressed must be bool")
+        if self.subject_suppressed and self.subject_id is None:
+            raise ValueError("subject-suppressed results require subject_id")
         for r in self.phase2_reasons:
             if not isinstance(r, ReasonCode):
                 raise ValueError(
@@ -444,3 +483,8 @@ class AdjudicationResult:
                 raise ValueError(
                     f"{self.semantic_decision!r} forbids model_error_category"
                 )
+
+    @property
+    def event_id(self) -> str | None:
+        """Durable event identity selected by clustering, when available."""
+        return self.cluster_id

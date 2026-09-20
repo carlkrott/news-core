@@ -8,6 +8,7 @@ import unicodedata
 from .clustering import score_pair
 from .event_contracts import (
     FactDelta,
+    FactKind,
     InternalRuleDecision,
     RuleVerdict,
     SemanticReasonCode,
@@ -118,6 +119,17 @@ def _fact_deltas(candidate_facts, history_facts, topic_gate: Decimal) -> tuple[t
     return tuple(deltas), conflict
 
 
+def _state_delta(old_value: str, new_value: str, topic_gate: Decimal) -> FactDelta:
+    """Represent a grounded lifecycle transition as a typed material delta."""
+    return FactDelta(
+        kind=FactKind.STATE,
+        unit="lifecycle",
+        old_value=old_value,
+        new_value=new_value,
+        topic_gate=topic_gate,
+    )
+
+
 def classify_pair(candidate, history, scored: "object") -> RuleVerdict:
     """Apply the addendum's six-rule precedence chain to one scored pair."""
     candidate_text = candidate.title + " " + candidate.snippet
@@ -131,15 +143,30 @@ def classify_pair(candidate, history, scored: "object") -> RuleVerdict:
 
     correction_families = ("correction", "retraction", "reversal")
     if topic_gate >= Decimal("0.500000") and any(_has_positive(candidate_hits, family) and not _has_positive(history_hits, family) for family in correction_families):
-        return RuleVerdict(InternalRuleDecision.material_update, (SemanticReasonCode.CORRECTION_OR_RETRACTION,), ())
+        family = next(family for family in correction_families if _has_positive(candidate_hits, family) and not _has_positive(history_hits, family))
+        return RuleVerdict(
+            InternalRuleDecision.material_update,
+            (SemanticReasonCode.CORRECTION_OR_RETRACTION,),
+            (_state_delta("published", family, topic_gate),),
+        )
 
     if topic_gate >= Decimal("0.500000") and _has_positive(history_hits, "old_rumor") and _has_positive(candidate_hits, "new_official"):
-        return RuleVerdict(InternalRuleDecision.material_update, (SemanticReasonCode.CONFIRMED_RUMOR,), ())
+        return RuleVerdict(
+            InternalRuleDecision.material_update,
+            (SemanticReasonCode.CONFIRMED_RUMOR,),
+            (_state_delta("rumor", "confirmed", topic_gate),),
+        )
 
     old_advance = any(_has_positive(history_hits, family) for family in ("old_announced", "old_preorder"))
     new_advance = any(_has_positive(candidate_hits, family) for family in ("new_launched", "new_shipped_ga"))
     if topic_gate >= Decimal("0.500000") and old_advance and new_advance:
-        return RuleVerdict(InternalRuleDecision.material_update, (SemanticReasonCode.LAUNCHED_OR_SHIPPED,), ())
+        old_state = "preorder" if any(_has_positive(history_hits, family) for family in ("old_preorder",)) else "announced"
+        new_state = "shipped" if any(_has_positive(candidate_hits, family) for family in ("new_shipped_ga",)) else "launched"
+        return RuleVerdict(
+            InternalRuleDecision.material_update,
+            (SemanticReasonCode.LAUNCHED_OR_SHIPPED,),
+            (_state_delta(old_state, new_state, topic_gate),),
+        )
 
     candidate_facts = extract_facts(candidate.title, candidate.snippet)
     history_facts = extract_facts(history.title, history.snippet)

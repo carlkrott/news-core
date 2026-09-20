@@ -17,8 +17,9 @@ from .event_contracts import (
     EventCandidate,
     SemanticDecision,
     SemanticReasonCode,
+    event_version_identity,
 )
-from .models import Category
+from .models import Category, subject_for_category
 
 
 # Phase 4 / Phase 5 must not flip this flag.
@@ -120,6 +121,38 @@ class BriefingInput:
     def ordinal(self) -> int:
         return self.event_candidate.filter_result.ordinal
 
+    @property
+    def event_id(self) -> str | None:
+        """Durable event ID, when Phase 3 clustering supplied one."""
+        return self.adjudication.event_id
+
+    @property
+    def event_version(self) -> int | None:
+        """Durable event version, when the adjudicator supplied one."""
+        return self.adjudication.event_version
+
+    @property
+    def subject_id(self) -> str:
+        """The single report subject owned by this category/event."""
+        return self.adjudication.subject_id or subject_for_category(self.category).value
+
+    @property
+    def subject_suppressed(self) -> bool:
+        return self.adjudication.subject_suppressed
+
+    @property
+    def delivery_identity(self) -> str:
+        """Return subject/event/version identity or legacy candidate identity."""
+        if self.event_id is None:
+            return self.candidate_id
+        if self.subject_suppressed:
+            return self.candidate_id
+        return event_version_identity(
+            self.subject_id,
+            self.event_id,
+            self.event_version if self.event_version is not None else 1,
+        )
+
 
 # ---------------------------------------------------------------------------
 # EligibilityResult + map_eligibility
@@ -179,7 +212,7 @@ class EligibilityResult:
         should_include = decision in (
             SemanticDecision.distinct_event,
             SemanticDecision.material_update,
-        )
+        ) and not self.briefing_input.subject_suppressed
         if self.included is not should_include or self.excluded is should_include:
             raise ValueError(
                 "EligibilityResult flags disagree with semantic_decision: "
@@ -200,6 +233,8 @@ def _first_reason(inp: BriefingInput) -> SemanticReasonCode:
     ``SemanticReasonCode`` values, so the first entry is always valid.
     """
     reasons = inp.adjudication.semantic_reasons
+    if inp.subject_suppressed:
+        return SemanticReasonCode.SUBJECT_COLLISION_SUPPRESSED
     if not reasons:
         # Defensive: the result XOR check requires a real reason, and a
         # future caller could construct a non-validated tuple; never let
