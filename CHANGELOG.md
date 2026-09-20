@@ -42,8 +42,16 @@ All notable changes to the public news-core source are recorded here.
   reconcile into subject-scoped `report_events`, and silent promotion gaps
   become typed audit discrepancies.  Unverified, watchlist, rejected, and
   superseded versions remain excluded.  Public workers remain
-  delivery-disabled; this structural change performs no live migration or
-  schedule activation.
+  delivery-disabled; this structural change performs no live migration
+  or schedule activation.
+- Added Run 7 subject-scoped editorial generation and deterministic post-model
+  QC: Professional AV lanes share one isolated subject request, Audio
+  Engineering remains separate, verified event/version IDs and exact fact
+  deltas/source URLs are carried through the request, malformed or
+  cross-subject output becomes a bounded fallback, successful output is
+  cacheable only after QC, and empty subject reports expose an explicit
+  no-delivery state. Public workers remain delivery-disabled; this structural
+  change performs no live migration or schedule activation.
 
 ## [0.1.0] - 2026-09-15
 
