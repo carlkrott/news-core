@@ -31,7 +31,17 @@ from enum import Enum
 from collections.abc import MutableMapping
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from .models import Category
+from .event_contracts import FactDelta, FactKind, event_version_identity
+from .editorial_qc import (
+    EditorialQCError,
+    SubjectEditorialInput,
+    SubjectEditorialOutput,
+    render_summary,
+    subject_policy,
+    validate_subject_inputs,
+    validate_subject_outputs,
+)
+from .models import Category, Subject
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +302,12 @@ class SummaryItem:
     summary: str
     source: SummarySource
     error_category: Optional[SummarizerErrorCategory]
+    subject_id: Optional[str] = None
+    event_id: Optional[str] = None
+    event_version: Optional[int] = None
+    source_url: Optional[str] = None
+    what_changed: Optional[str] = None
+    why_it_matters: Optional[str] = None
 
     def __post_init__(self) -> None:
         if type(self.candidate_id) is not str:
@@ -312,6 +328,22 @@ class SummaryItem:
             self.error_category, SummarizerErrorCategory
         ):
             raise TypeError("SummaryItem.error_category must be SummarizerErrorCategory or None")
+        if self.subject_id is not None and type(self.subject_id) is not str:
+            raise TypeError("SummaryItem.subject_id must be str or None")
+        if self.event_id is not None and type(self.event_id) is not str:
+            raise TypeError("SummaryItem.event_id must be str or None")
+        if self.event_version is not None and (
+            type(self.event_version) is not int or self.event_version <= 0
+        ):
+            raise ValueError("SummaryItem.event_version must be a positive int or None")
+        if self.source_url is not None:
+            if type(self.source_url) is not str:
+                raise TypeError("SummaryItem.source_url must be str or None")
+            _validate_http_url(self.source_url)
+        for field_name in ("what_changed", "why_it_matters"):
+            value = getattr(self, field_name)
+            if value is not None and type(value) is not str:
+                raise TypeError(f"SummaryItem.{field_name} must be str or None")
         if self.source is SummarySource.FALLBACK:
             if self.error_category is None:
                 raise ValueError("FALLBACK requires an error_category")
@@ -525,6 +557,160 @@ def request_cache_key(
     """
     encoded = canonical_request_bytes(category, items)
     return hashlib.sha256(encoded).digest()
+
+
+# ---------------------------------------------------------------------------
+# Subject-scoped editorial request envelope
+# ---------------------------------------------------------------------------
+
+
+MAX_ITEMS_PER_SUBJECT = MAX_ITEMS_PER_CATEGORY
+ONE_CALL_PER_SUBJECT = 1
+
+
+def _fact_delta_dict(delta: FactDelta) -> Dict[str, str]:
+    return {
+        "kind": delta.kind.value,
+        "unit": delta.unit,
+        "old_value": delta.old_value,
+        "new_value": delta.new_value,
+        "topic_gate": str(delta.topic_gate),
+    }
+
+
+def _fact_delta_from_dict(raw: Any) -> FactDelta:
+    if not isinstance(raw, dict) or set(raw) != {
+        "kind", "unit", "old_value", "new_value", "topic_gate"
+    }:
+        raise SummarizerMalformedError("editorial fact_deltas item has an invalid shape")
+    if any(type(raw[key]) is not str for key in raw):
+        raise SummarizerMalformedError("editorial fact_deltas values must be strings")
+    try:
+        from decimal import Decimal
+
+        return FactDelta(
+            kind=FactKind(raw["kind"]),
+            unit=raw["unit"],
+            old_value=raw["old_value"],
+            new_value=raw["new_value"],
+            topic_gate=Decimal(raw["topic_gate"]),
+        )
+    except (TypeError, ValueError, ArithmeticError) as exc:
+        raise SummarizerMalformedError("editorial fact_delta is invalid") from exc
+
+
+def _subject_request_dict(
+    subject: Subject, inputs: Sequence[SubjectEditorialInput]
+) -> Dict[str, Any]:
+    if not isinstance(subject, Subject):
+        raise TypeError("subject must be a Subject enum")
+    validated = validate_subject_inputs(subject, tuple(inputs))
+    if len(validated) > MAX_ITEMS_PER_SUBJECT:
+        raise ValueError("subject request allows at most 32 items")
+    return {
+        "subject": subject.value,
+        "policy": {
+            "allowed_categories": [
+                category.value for category in subject_policy(subject)
+            ],
+            "verified_facts_only": True,
+            "format": ("what_changed", "why_it_matters"),
+            "source_url_rule": "byte_identical_to_input_source_urls",
+        },
+        "items": [
+            {
+                "event_id": item.event_id,
+                "event_version": item.event_version,
+                "title": item.title,
+                "fact_deltas": [_fact_delta_dict(delta) for delta in item.fact_deltas],
+                "source_urls": list(item.source_urls),
+            }
+            for item in validated
+        ],
+    }
+
+
+def canonical_subject_request_bytes(
+    subject: Subject, inputs: Sequence[SubjectEditorialInput]
+) -> bytes:
+    encoded = json.dumps(
+        _subject_request_dict(subject, inputs),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    if len(encoded) > MAX_REQUEST_BYTES:
+        raise ValueError(
+            f"canonical subject request exceeds {MAX_REQUEST_BYTES} bytes, got len={len(encoded)}"
+        )
+    return encoded
+
+
+def subject_request_cache_key(
+    subject: Subject, inputs: Sequence[SubjectEditorialInput]
+) -> bytes:
+    return hashlib.sha256(canonical_subject_request_bytes(subject, inputs)).digest()
+
+
+def parse_subject_response(
+    response_bytes: bytes | bytearray,
+    *,
+    subject: Subject,
+    expected_inputs: Sequence[SubjectEditorialInput],
+) -> Tuple[SubjectEditorialOutput, ...]:
+    """Parse and QC one strict subject-scoped editorial response."""
+    if not isinstance(response_bytes, (bytes, bytearray)):
+        raise TypeError("response_bytes must be bytes")
+    raw = bytes(response_bytes)
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise SummarizerMalformedError("subject response exceeds response byte limit")
+    try:
+        text = raw.decode("utf-8", errors="strict")
+        parsed = json.loads(
+            _strip_ascii_whitespace(text),
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                SummarizerMalformedError(f"non-finite editorial constant: {token!r}")
+            ),
+            object_pairs_hook=_reject_duplicate_pairs,
+        )
+    except UnicodeDecodeError as exc:
+        raise SummarizerMalformedError("subject response is not strict UTF-8") from exc
+    except json.JSONDecodeError as exc:
+        raise SummarizerMalformedError("subject response is not valid JSON") from exc
+    if not isinstance(parsed, dict) or set(parsed) != {"items"}:
+        raise SummarizerMalformedError("subject response root must contain only items")
+    raw_items = parsed["items"]
+    if not isinstance(raw_items, list) or len(raw_items) > MAX_ITEMS_PER_SUBJECT:
+        raise SummarizerMalformedError("subject response items must be a bounded list")
+    allowed_keys = frozenset(
+        {
+            "subject", "event_id", "event_version", "what_changed",
+            "why_it_matters", "source_url", "fact_deltas",
+        }
+    )
+    outputs: list[SubjectEditorialOutput] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict) or frozenset(raw_item) != allowed_keys:
+            raise SummarizerMalformedError("subject response item keys are invalid")
+        try:
+            output = SubjectEditorialOutput(
+                subject=Subject(raw_item["subject"]),
+                event_id=raw_item["event_id"],
+                event_version=raw_item["event_version"],
+                what_changed=raw_item["what_changed"],
+                why_it_matters=raw_item["why_it_matters"],
+                source_url=raw_item["source_url"],
+                fact_deltas=tuple(_fact_delta_from_dict(item) for item in raw_item["fact_deltas"]),
+            )
+        except EditorialQCError:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SummarizerMalformedError("subject response item is invalid") from exc
+        outputs.append(output)
+    try:
+        return validate_subject_outputs(subject, tuple(expected_inputs), tuple(outputs))
+    except EditorialQCError:
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -773,6 +959,12 @@ def _cache_items_to_source(
             summary=it.summary,
             source=SummarySource.CACHE,
             error_category=None,
+            subject_id=it.subject_id,
+            event_id=it.event_id,
+            event_version=it.event_version,
+            source_url=it.source_url,
+            what_changed=it.what_changed,
+            why_it_matters=it.why_it_matters,
         )
         for it in cached.items
     )
@@ -818,6 +1010,7 @@ class SummarizerSession:
         self._model_calls = 0
         self._cache_hits = 0
         self._uncached_calls: Dict[Category, int] = {}
+        self._uncached_subject_calls: Dict[Subject, int] = {}
 
     @property
     def model_call_count(self) -> int:
@@ -1070,6 +1263,158 @@ class SummarizerSession:
             items=tuple(rebuilt), model_used=True, cache_hit=False
         )
 
+    def summarize_subject(
+        self,
+        subject: Subject,
+        raw_inputs: Sequence[SubjectEditorialInput],
+    ) -> CategorySummaryResult:
+        """Generate one isolated, strictly-QC'd report for one subject.
+
+        This is deliberately separate from ``summarize_category``. Legacy
+        category callers retain their frozen contract, while Run 7 callers
+        receive one request envelope containing only one subject's verified
+        event versions, fact deltas, source URLs, and policy.
+        """
+        if not isinstance(subject, Subject):
+            raise TypeError("subject must be a Subject enum")
+        if not isinstance(raw_inputs, (tuple, list)):
+            raise TypeError("raw_inputs must be tuple/list")
+        validated = validate_subject_inputs(subject, tuple(raw_inputs))
+        if not validated:
+            return CategorySummaryResult(items=(), model_used=False, cache_hit=False)
+
+        kept = tuple(validated[:MAX_ITEMS_PER_SUBJECT])
+        overflow = tuple(validated[MAX_ITEMS_PER_SUBJECT:])
+        try:
+            request_bytes = canonical_subject_request_bytes(subject, kept)
+        except ValueError:
+            return CategorySummaryResult(
+                items=self._subject_fallback_items(
+                    validated, SummarizerErrorCategory.INPUT_BOUNDS
+                ),
+                model_used=False,
+                cache_hit=False,
+            )
+        cache_key = hashlib.sha256(request_bytes).digest()
+        cached = self._cache.get(cache_key)
+        expected_ids = tuple(
+            event_version_identity(item.subject.value, item.event_id, item.event_version)
+            for item in kept
+        )
+        if cached is not None:
+            cached_ids = tuple(item.candidate_id for item in cached.items)
+            if cached_ids != expected_ids:
+                raise RuntimeError("subject cache value IDs do not match request")
+            self._cache_hits += 1
+            cached_rows = {
+                item.candidate_id: item for item in _cache_items_to_source(cached)
+            }
+            rows = [cached_rows[item_id] for item_id in expected_ids]
+            rows.extend(
+                self._subject_fallback_items(
+                    overflow, SummarizerErrorCategory.INPUT_BOUNDS
+                )
+            )
+            return CategorySummaryResult(
+                items=tuple(rows), model_used=False, cache_hit=True
+            )
+
+        subject_calls = self._uncached_subject_calls.get(subject, 0)
+        if self._model_calls >= TOTAL_CALL_BUDGET or subject_calls >= ONE_CALL_PER_SUBJECT:
+            return CategorySummaryResult(
+                items=self._subject_fallback_items(
+                    kept, SummarizerErrorCategory.BUDGET_EXHAUSTED
+                )
+                + self._subject_fallback_items(
+                    overflow, SummarizerErrorCategory.INPUT_BOUNDS
+                ),
+                model_used=False,
+                cache_hit=False,
+            )
+
+        try:
+            response_bytes = self._transport(request_bytes)
+        except SummarizerTransportError:
+            self._model_calls += 1
+            self._uncached_subject_calls[subject] = subject_calls + 1
+            return CategorySummaryResult(
+                items=self._subject_fallback_items(
+                    kept, SummarizerErrorCategory.TRANSPORT_ERROR
+                )
+                + self._subject_fallback_items(
+                    overflow, SummarizerErrorCategory.INPUT_BOUNDS
+                ),
+                model_used=True,
+                cache_hit=False,
+            )
+        self._model_calls += 1
+        self._uncached_subject_calls[subject] = subject_calls + 1
+        try:
+            outputs = parse_subject_response(
+                response_bytes, subject=subject, expected_inputs=kept
+            )
+        except (SummarizerMalformedError, EditorialQCError):
+            return CategorySummaryResult(
+                items=self._subject_fallback_items(
+                    kept, SummarizerErrorCategory.MALFORMED_OUTPUT
+                )
+                + self._subject_fallback_items(
+                    overflow, SummarizerErrorCategory.INPUT_BOUNDS
+                ),
+                model_used=True,
+                cache_hit=False,
+            )
+
+        success_items = tuple(
+            SummaryItem(
+                candidate_id=event_version_identity(
+                    output.subject.value, output.event_id, output.event_version
+                ),
+                summary=render_summary((output,)).text.replace("\n", " "),
+                source=SummarySource.MODEL,
+                error_category=None,
+                subject_id=output.subject.value,
+                event_id=output.event_id,
+                event_version=output.event_version,
+                source_url=output.source_url,
+                what_changed=output.what_changed,
+                why_it_matters=output.why_it_matters,
+            )
+            for output in outputs
+        )
+        self._cache[cache_key] = SummarizerCacheValue(
+            items=success_items, model_used=True
+        )
+        return CategorySummaryResult(
+            items=success_items
+            + self._subject_fallback_items(
+                overflow, SummarizerErrorCategory.INPUT_BOUNDS
+            ),
+            model_used=True,
+            cache_hit=False,
+        )
+
+    @staticmethod
+    def _subject_fallback_items(
+        inputs: Sequence[SubjectEditorialInput],
+        error_category: SummarizerErrorCategory,
+    ) -> Tuple[SummaryItem, ...]:
+        return tuple(
+            SummaryItem(
+                candidate_id=event_version_identity(
+                    item.subject.value, item.event_id, item.event_version
+                ),
+                summary=item.title,
+                source=SummarySource.FALLBACK,
+                error_category=error_category,
+                subject_id=item.subject.value,
+                event_id=item.event_id,
+                event_version=item.event_version,
+                source_url=item.source_urls[0],
+            )
+            for item in inputs
+        )
+
     def _items_with_fallback_for_valid(
         self,
         classifications: List[Dict[str, Any]],
@@ -1096,8 +1441,10 @@ class SummarizerSession:
 
 __all__ = (
     "ONE_CALL_PER_CATEGORY",
+    "ONE_CALL_PER_SUBJECT",
     "TOTAL_CALL_BUDGET",
     "MAX_ITEMS_PER_CATEGORY",
+    "MAX_ITEMS_PER_SUBJECT",
     "MAX_REQUEST_BYTES",
     "MAX_RESPONSE_BYTES",
     "SummarizerCacheValue",
@@ -1112,6 +1459,9 @@ __all__ = (
     "SummarySource",
     "CategorySummaryResult",
     "canonical_request_bytes",
+    "canonical_subject_request_bytes",
     "parse_summary_response",
+    "parse_subject_response",
     "request_cache_key",
+    "subject_request_cache_key",
 )

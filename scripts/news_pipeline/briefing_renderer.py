@@ -16,7 +16,7 @@ import re
 from zoneinfo import ZoneInfo
 
 from .event_contracts import FactDelta, SemanticDecision, SemanticReasonCode
-from .models import Category
+from .models import Category, Subject, subject_for_category
 
 
 _LOCAL_TZ = ZoneInfo("Europe/London")
@@ -51,10 +51,20 @@ _CATEGORY_LABELS = {
     Category.OUR_SETUP: "Our Setup",
 }
 _CATEGORY_ORDER = {category: index for index, category in enumerate(Category)}
+_SUBJECT_LABELS = {
+    Subject.AI: "AI",
+    Subject.WORLD: "World",
+    Subject.AUDIO_ENGINEERING: "Audio Engineering",
+    Subject.PROFESSIONAL_AV: "Professional AV",
+    Subject.HARDWARE: "Hardware",
+    Subject.FANTASY_NOVEL: "Fantasy Novel",
+    Subject.OUR_SETUP: "Our Setup",
+}
 
 
 class RenderStatus(str, Enum):
     EMPTY = "EMPTY"
+    NO_DELIVERY = "NO_DELIVERY"
     RENDERED = "RENDERED"
 
 
@@ -77,6 +87,9 @@ class RenderRecord:
     semantic_reasons: tuple[SemanticReasonCode, ...]
     fact_deltas: tuple[FactDelta, ...]
     ordinal: int
+    subject_id: str | None = None
+    event_id: str | None = None
+    event_version: int | None = None
 
     def __post_init__(self) -> None:
         if type(self.candidate_id) is not str:
@@ -91,6 +104,25 @@ class RenderRecord:
             raise TypeError(
                 f"RenderRecord.category must be Category, got {type(self.category).__name__}"
             )
+        if self.subject_id is not None:
+            if type(self.subject_id) is not str:
+                raise TypeError("RenderRecord.subject_id must be str or None")
+            try:
+                subject = Subject(self.subject_id)
+            except ValueError as exc:
+                raise ValueError("RenderRecord.subject_id must be a known Subject") from exc
+            if subject_for_category(self.category) is not subject:
+                raise ValueError("RenderRecord.subject_id does not match category")
+        if self.event_id is not None and type(self.event_id) is not str:
+            raise TypeError("RenderRecord.event_id must be str or None")
+        if self.event_id is not None and not self.event_id:
+            raise ValueError("RenderRecord.event_id must be non-empty when supplied")
+        if self.event_version is not None and (
+            type(self.event_version) is not int or self.event_version <= 0
+        ):
+            raise ValueError("RenderRecord.event_version must be a positive int or None")
+        if (self.event_id is None) != (self.event_version is None):
+            raise ValueError("RenderRecord.event_id and event_version must be supplied together")
         if not isinstance(self.decision, SemanticDecision):
             raise TypeError(
                 f"RenderRecord.decision must be SemanticDecision, got {type(self.decision).__name__}"
@@ -165,9 +197,9 @@ class RenderResult:
                 raise TypeError(
                     f"RenderResult.chunks entries must be str, got {type(chunk).__name__}"
                 )
-        if self.status is RenderStatus.EMPTY:
+        if self.status in (RenderStatus.EMPTY, RenderStatus.NO_DELIVERY):
             if self.chunks:
-                raise ValueError("RenderResult.EMPTY requires an empty chunks tuple")
+                raise ValueError("empty render statuses require an empty chunks tuple")
         elif not self.chunks:
             raise ValueError("RenderResult.RENDERED requires at least one chunk")
 
@@ -271,11 +303,18 @@ def render_briefing(
     records: Sequence[RenderRecord],
     upper_bound_utc: datetime,
     parse_mode=None,
+    subject_id: str | None = None,
 ) -> RenderResult:
     del parse_mode
     if not isinstance(records, (tuple, list)):
         raise TypeError(f"records must be tuple or list, got {type(records).__name__}")
     if not records:
+        if subject_id is not None:
+            try:
+                Subject(subject_id)
+            except ValueError as exc:
+                raise ValueError("subject_id must be a known Subject") from exc
+            return RenderResult(status=RenderStatus.NO_DELIVERY, chunks=())
         return RenderResult(status=RenderStatus.EMPTY, chunks=())
 
     normalized_records = []
@@ -286,9 +325,26 @@ def render_briefing(
             )
         normalized_records.append(record)
 
+    identities = set()
+    for record in normalized_records:
+        if subject_id is not None and record.subject_id != subject_id:
+            raise ValueError("render batch contains a cross-subject record")
+        identity = (
+            record.subject_id,
+            record.event_id,
+            record.event_version,
+            record.candidate_id,
+        )
+        if identity in identities:
+            raise ValueError("render batch contains a duplicate event identity")
+        identities.add(identity)
+
     _validate_upper_bound_utc(upper_bound_utc)
     local_date = _validate_upper_bound_utc(upper_bound_utc).astimezone(_LOCAL_TZ).date()
     header = f"Morning briefing — {local_date:%Y-%m-%d}"
+    subject_label = None
+    if subject_id is not None:
+        subject_label = _SUBJECT_LABELS[Subject(subject_id)]
 
     ordered_records = sorted(normalized_records, key=_sort_key)
     chunks: list[str] = []
@@ -301,7 +357,8 @@ def render_briefing(
         label = _CATEGORY_LABELS[record.category]
         record_paragraph = _render_record_paragraph(record)
         if current_text is None:
-            candidate_text = _PARAGRAPH_SEPARATOR.join((header, label, record_paragraph))
+            first_parts = (header,) if subject_label is None else (header, subject_label)
+            candidate_text = _PARAGRAPH_SEPARATOR.join((*first_parts, label, record_paragraph))
         elif current_category is record.category:
             candidate_text = current_text + _PARAGRAPH_SEPARATOR + record_paragraph
         else:
@@ -314,7 +371,8 @@ def render_briefing(
 
         if current_text is not None:
             chunks.append(current_text)
-        candidate_text = _PARAGRAPH_SEPARATOR.join((header, label, record_paragraph))
+        first_parts = (header,) if subject_label is None else (header, subject_label)
+        candidate_text = _PARAGRAPH_SEPARATOR.join((*first_parts, label, record_paragraph))
         if utf16_units(candidate_text) > _MAX_CHUNK_UNITS:
             raise OversizeRecordError(record.candidate_id)
         current_text = candidate_text

@@ -60,6 +60,7 @@ from .briefing_renderer import (
     RenderStatus,
     utf16_units,
 )
+from .editorial_qc import SubjectEditorialInput, subject_policy
 from .briefing_summarizer import (
     CANDIDATE_ID_MAX,
     CANDIDATE_ID_MIN,
@@ -75,7 +76,7 @@ from .briefing_summarizer import (
 )
 from .contracts import validate_utc_iso
 from .event_contracts import EventCandidate, FactDelta, SemanticDecision, SemanticReasonCode
-from .models import Category
+from .models import Category, Subject
 
 
 # Phase 4 / Phase 5 must not flip this flag.
@@ -171,7 +172,10 @@ class RendererProtocol(Protocol):
     """Structural surface the engine uses on a renderer."""
 
     def render_briefing(
-        self, records: Sequence[RenderRecord], upper_bound_utc: datetime
+        self,
+        records: Sequence[RenderRecord],
+        upper_bound_utc: datetime,
+        subject_id: str | None = None,
     ) -> RenderResult: ...
 
 
@@ -188,6 +192,10 @@ class SummarizerProtocol(Protocol):
 
     def summarize_category(
         self, category: Category, raw_inputs: Sequence[Any]
+    ) -> Any: ...
+
+    def summarize_subject(
+        self, subject: Subject, raw_inputs: Sequence[Any]
     ) -> Any: ...
 
     @property
@@ -453,6 +461,9 @@ def _build_render_record(
         semantic_reasons=tuple(briefing_input.adjudication.semantic_reasons),
         fact_deltas=tuple(fact_deltas),
         ordinal=ordinal,
+        subject_id=briefing_input.subject_id,
+        event_id=briefing_input.event_id,
+        event_version=briefing_input.event_version,
     )
 
 
@@ -673,52 +684,107 @@ class BriefingEngine:
             )
         )
 
-        # Group by category in declaration order.
-        groups: Dict[Category, list[BriefingInput]] = {}
-        category_order_seen: list[Category] = []
-        for bi, _elig in eligible_inputs:
-            if bi.category not in groups:
-                groups[bi.category] = []
-                category_order_seen.append(bi.category)
-            groups[bi.category].append(bi)
-
-        # Summarize per category in declaration order; the engine may
-        # never exceed one uncached call per category and 8 total.
+        # Run 7 uses one isolated summarizer request per Subject. Legacy
+        # injected doubles that expose only summarize_category retain the
+        # pre-Run-7 category path so old callers remain source-compatible.
+        subject_capable = callable(getattr(self._summarizer, "summarize_subject", None))
         any_fallback = False
-        for category in category_order_seen:
-            items_in_category = groups[category]
-            raw_inputs: list[Any] = []
-            direct_fallbacks: Dict[str, SummaryItem] = {}
-            for bi in items_in_category:
-                candidate = bi.event_candidate.candidate
-                if _raw_bounds_invalid(bi):
-                    direct_fallbacks[bi.delivery_identity] = SummaryItem(
-                        candidate_id=bi.delivery_identity,
-                        summary="Input bounds exceeded",
-                        source=SummarySource.FALLBACK,
-                        error_category=SummarizerErrorCategory.INPUT_BOUNDS,
+        if subject_capable:
+            groups: Dict[Subject, list[BriefingInput]] = {}
+            subject_order_seen: list[Subject] = []
+            for bi, _elig in eligible_inputs:
+                subject = Subject(bi.subject_id)
+                if subject not in groups:
+                    groups[subject] = []
+                    subject_order_seen.append(subject)
+                groups[subject].append(bi)
+            subject_order_seen.sort(key=lambda item: tuple(Subject).index(item))
+            for subject in subject_order_seen:
+                items_in_subject = groups[subject]
+                raw_inputs: list[SubjectEditorialInput] = []
+                direct_fallbacks: Dict[str, SummaryItem] = {}
+                for bi in items_in_subject:
+                    if _raw_bounds_invalid(bi):
+                        direct_fallbacks[bi.delivery_identity] = SummaryItem(
+                            candidate_id=bi.delivery_identity,
+                            summary="Input bounds exceeded",
+                            source=SummarySource.FALLBACK,
+                            error_category=SummarizerErrorCategory.INPUT_BOUNDS,
+                        )
+                        continue
+                    try:
+                        raw_inputs.append(self._subject_summarizer_input_for(bi, subject))
+                    except (TypeError, ValueError):
+                        direct_fallbacks[bi.delivery_identity] = SummaryItem(
+                            candidate_id=bi.delivery_identity,
+                            summary="Input bounds exceeded",
+                            source=SummarySource.FALLBACK,
+                            error_category=SummarizerErrorCategory.INPUT_BOUNDS,
+                        )
+                summary_items: Tuple[SummaryItem, ...] = ()
+                if raw_inputs:
+                    summary_result = self._summarizer.summarize_subject(
+                        subject, raw_inputs
                     )
-                else:
-                    raw_inputs.append(self._summarizer_input_for(bi))
-            summary_items: Tuple[SummaryItem, ...] = ()
-            if raw_inputs:
-                summary_result = self._summarizer.summarize_category(
-                    category, raw_inputs
-                )
-                summary_items = tuple(summary_result.items)
-                if any(item.source is SummarySource.FALLBACK for item in summary_items):
+                    summary_items = tuple(summary_result.items)
+                    if any(item.source is SummarySource.FALLBACK for item in summary_items):
+                        any_fallback = True
+                cid_to_summary = {item.candidate_id: item for item in summary_items}
+                cid_to_summary.update(direct_fallbacks)
+                for bi in items_in_subject:
+                    included_items.append(
+                        EngineIncludedItem(
+                            briefing_input=bi,
+                            summary_item=cid_to_summary[bi.delivery_identity],
+                        )
+                    )
+                if direct_fallbacks:
                     any_fallback = True
-            cid_to_summary = {item.candidate_id: item for item in summary_items}
-            cid_to_summary.update(direct_fallbacks)
-            for bi in items_in_category:
-                included_items.append(
-                    EngineIncludedItem(
-                        briefing_input=bi,
-                        summary_item=cid_to_summary[bi.delivery_identity],
+        else:
+            # Group by category in declaration order.
+            legacy_groups: Dict[Category, list[BriefingInput]] = {}
+            category_order_seen: list[Category] = []
+            for bi, _elig in eligible_inputs:
+                if bi.category not in legacy_groups:
+                    legacy_groups[bi.category] = []
+                    category_order_seen.append(bi.category)
+                legacy_groups[bi.category].append(bi)
+
+            # Summarize per category in declaration order; the engine may
+            # never exceed one uncached call per category and 8 total.
+            for category in category_order_seen:
+                items_in_category = legacy_groups[category]
+                raw_inputs = []
+                direct_fallbacks = {}
+                for bi in items_in_category:
+                    if _raw_bounds_invalid(bi):
+                        direct_fallbacks[bi.delivery_identity] = SummaryItem(
+                            candidate_id=bi.delivery_identity,
+                            summary="Input bounds exceeded",
+                            source=SummarySource.FALLBACK,
+                            error_category=SummarizerErrorCategory.INPUT_BOUNDS,
+                        )
+                    else:
+                        raw_inputs.append(self._summarizer_input_for(bi))
+                summary_items = ()
+                if raw_inputs:
+                    summary_result = self._summarizer.summarize_category(
+                        category, raw_inputs
                     )
-                )
-            if direct_fallbacks:
-                any_fallback = True
+                    summary_items = tuple(summary_result.items)
+                    if any(item.source is SummarySource.FALLBACK for item in summary_items):
+                        any_fallback = True
+                cid_to_summary = {item.candidate_id: item for item in summary_items}
+                cid_to_summary.update(direct_fallbacks)
+                for bi in items_in_category:
+                    included_items.append(
+                        EngineIncludedItem(
+                            briefing_input=bi,
+                            summary_item=cid_to_summary[bi.delivery_identity],
+                        )
+                    )
+                if direct_fallbacks:
+                    any_fallback = True
 
         included_items_tuple: Tuple[EngineIncludedItem, ...] = tuple(included_items)
         excluded_items_tuple: Tuple[EngineExcludedItem, ...] = tuple(excluded_items)
@@ -759,10 +825,30 @@ class BriefingEngine:
                 )
             )
 
-        # Render — renderer overflow is the only path that fails the run.
-        render_result: RenderResult = self._renderer.render_briefing(
-            render_records, upper_bound_utc=upper_utc
-        )
+        # Render — subject-capable runs invoke the renderer once per subject
+        # so no renderer call receives cross-subject context. Legacy runs
+        # preserve the single combined render call.
+        if subject_capable and render_records:
+            render_groups: Dict[Subject, list[RenderRecord]] = {}
+            for record in render_records:
+                subject = Subject(record.subject_id)
+                render_groups.setdefault(subject, []).append(record)
+            render_chunks: list[str] = []
+            for subject in sorted(render_groups, key=lambda item: tuple(Subject).index(item)):
+                subject_render = self._renderer.render_briefing(
+                    render_groups[subject],
+                    upper_bound_utc=upper_utc,
+                    subject_id=subject.value,
+                )
+                render_chunks.extend(subject_render.chunks)
+            render_result = RenderResult(
+                status=(RenderStatus.RENDERED if render_chunks else RenderStatus.NO_DELIVERY),
+                chunks=tuple(render_chunks),
+            )
+        else:
+            render_result = self._renderer.render_briefing(
+                render_records, upper_bound_utc=upper_utc
+            )
 
         # Build ShadowEvent list and complete the ledger ONLY after render.
         decision_by_id: Dict[str, SemanticDecision] = {
@@ -857,6 +943,27 @@ class BriefingEngine:
             title=candidate.title,
             snippet=candidate.snippet,
             url=bi.url,
+        )
+
+    def _subject_summarizer_input_for(
+        self, bi: BriefingInput, subject: Subject
+    ) -> SubjectEditorialInput:
+        """Build the strict Run 7 subject input from one verified event."""
+        if bi.subject_id != subject.value:
+            raise ValueError("briefing input subject does not match subject group")
+        if bi.event_id is None or bi.event_version is None:
+            raise ValueError("subject editorial input requires event_id and event_version")
+        if bi.url is None:
+            raise ValueError("subject editorial input requires a canonical source URL")
+        candidate = bi.event_candidate.candidate
+        return SubjectEditorialInput(
+            subject=subject,
+            event_id=bi.event_id,
+            event_version=bi.event_version,
+            title=candidate.title,
+            fact_deltas=tuple(bi.adjudication.fact_deltas),
+            source_urls=(bi.url,),
+            policy=subject_policy(subject),
         )
 
     def _safe_fail_run(
