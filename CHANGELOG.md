@@ -59,6 +59,12 @@ All notable changes to the public news-core source are recorded here.
   part of the public scheduler vocabulary. Public workers remain
   delivery-disabled, and this change performs no live migration, private
   schedule activation, recipient binding, or external send.
+- Added Run 9 read-only quality metrics and a disposable synthetic rehearsal.
+  Count-only reports distinguish durable DB facts from typed receipt metrics;
+  absent persistence is explicit instead of guessed.  The rehearsal proves
+  unchanged replay, one material update in one subject, fail-closed exclusion
+  of stale/unverified/contaminated inputs, and zero delivery attempts without
+  external network, model, live database, schedule, service, or delivery use.
 
 ## [0.1.0] - 2026-09-15
 
