@@ -14,6 +14,7 @@ from .adjudication import _family_hits, _has_positive
 from .event_contracts import FactDelta, FactKind, event_version_identity
 from .live_contracts import VerificationState, stable_id
 from .schema_v5 import _validate_v5
+from .schema_v7 import backfill_source_item_provenance, registry_from_connection
 from .verification import plan_corroboration_queries, verify_evidence
 
 
@@ -219,6 +220,40 @@ def _v7_evidence_row(row: tuple, claim_subject: str) -> dict[str, object]:
     }
 
 
+def _v7_claims_are_verified(
+    connection: sqlite3.Connection, claim_ids: tuple[str, ...]
+) -> bool:
+    """Require verified claims and complete v7 evidence before direct promotion."""
+    if not claim_ids or len(set(claim_ids)) != len(claim_ids):
+        return False
+    placeholders = ",".join("?" for _ in claim_ids)
+    claim_rows = connection.execute(
+        f"SELECT claim_id,subject,status FROM claims WHERE claim_id IN ({placeholders})",
+        claim_ids,
+    ).fetchall()
+    if len(claim_rows) != len(claim_ids):
+        return False
+    all_evidence: list[dict[str, object]] = []
+    for claim_id, subject, status in claim_rows:
+        if status != VerificationState.VERIFIED.value:
+            return False
+        evidence_rows = connection.execute(
+            """SELECT ce.evidence_role,sp.effective_source_role,
+                      sp.independence_group,sp.authority_match,pr.authority_entities_json
+                 FROM claim_evidence ce
+                 LEFT JOIN source_item_provenance sp ON sp.source_item_id=ce.source_item_id
+                 LEFT JOIN publisher_registry pr ON pr.rule_id=sp.matched_rule_id
+                WHERE ce.claim_id=? ORDER BY ce.evidence_id""",
+            (claim_id,),
+        ).fetchall()
+        if not evidence_rows:
+            return False
+        all_evidence.extend(
+            _v7_evidence_row(row, str(subject)) for row in evidence_rows
+        )
+    return verify_evidence(tuple(all_evidence)) is VerificationState.VERIFIED
+
+
 def _is_retraction_text(source: Mapping[str, object]) -> bool:
     text = " ".join(str(source.get(name) or "") for name in ("title", "body"))
     hits = _family_hits(text)
@@ -249,6 +284,11 @@ def _append_locked(connection: sqlite3.Connection, decisions: Iterable[EventWrit
         ) = _event_write_fields(item)
         if subject_suppressed:
             continue
+        if state == VerificationState.VERIFIED.value and _has_schema_v7(connection):
+            if not _v7_claims_are_verified(connection, claim_ids):
+                raise ValueError(
+                    "verified event writes require v7-verified claims and evidence"
+                )
         prior = connection.execute("SELECT version FROM event_versions WHERE event_id=? ORDER BY version DESC LIMIT 1", (event_id,)).fetchone()
         version = prior[0] + 1 if prior else 1
         if semantic == "rewrite":
@@ -339,6 +379,30 @@ def process_phase4(db_path: str | Path, evaluated_at: str, *, max_items: int = 1
             connection.execute("INSERT OR IGNORE INTO runs(id,started_at,finished_at,kind,provenance,source_dir,notes) VALUES (?,?,?,?,?,?,?)", (run_id,evaluated_at,None,run_kind,run_provenance,str(db_path),""))
         counts = [0,0,0,0,0,0,0,0,0]
         plans_remaining = max_corroboration_plans
+        if has_v7 and selected:
+            selected_item_ids = tuple(item[4] for item in selected)
+            placeholders = ",".join("?" for _ in selected_item_ids)
+            missing_provenance = tuple(
+                row[0]
+                for row in connection.execute(
+                    f"""SELECT si.source_item_id
+                           FROM source_items si
+                          WHERE si.source_item_id IN ({placeholders})
+                            AND NOT EXISTS (
+                                SELECT 1 FROM source_item_provenance sp
+                                 WHERE sp.source_item_id=si.source_item_id
+                            )
+                          ORDER BY si.source_item_id""",
+                    selected_item_ids,
+                )
+            )
+            if missing_provenance:
+                backfill_source_item_provenance(
+                    connection,
+                    registry_from_connection(connection),
+                    evaluated_at,
+                    source_item_ids=missing_provenance,
+                )
         for decision_id, kind, reason, decided_at, source_item_id, _kind_of_run, _provenance in selected:
             explicit_semantic = reason.get("semantic_decision", reason.get("decision"))
             if explicit_semantic is not None:

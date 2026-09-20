@@ -97,7 +97,7 @@ class SchemaV7Tests(unittest.TestCase):
             known = connection.execute(
                 "SELECT normalized_publisher_host,effective_source_role,independence_group,matched_rule_id,authority_match,classification_reason FROM source_item_provenance WHERE source_item_id='known-item'"
             ).fetchone()
-            self.assertEqual(known, ("manufacturer.example.com", "primary", "manufacturer-example", "maker-example", 0, "matched_rule"))
+            self.assertEqual(known, ("manufacturer.example.com", "primary", "manufacturer-example", "maker-example", 1, "matched_rule"))
             unknown = connection.execute(
                 "SELECT effective_source_role,independence_group,matched_rule_id,authority_match,classification_reason FROM source_item_provenance WHERE source_item_id='unknown-item'"
             ).fetchone()

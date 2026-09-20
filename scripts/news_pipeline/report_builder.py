@@ -16,10 +16,17 @@ from .briefing_renderer import RenderResult
 from .event_contracts import AdjudicationResult, EventCandidate, SemanticDecision, SemanticReasonCode, event_version_identity
 from .models import Category, Subject, subject_for_category
 from .contracts import CandidateArticle, FilterResult, DecisionCode, ReasonCode, TrustTier
+from .live_contracts import VerificationState
 from .policies import QueryPolicy
 from .report_artifacts import ArtifactMismatch, ArtifactRoot, ReportArtifacts, ArtifactResult, compute_artifacts, verify_artifacts
 from .report_artifacts import _paths as _artifact_paths
 from datetime import timedelta
+from .verification import verify_evidence
+
+
+REPORT_EVENTS_PROMOTION_DISCREPANCY = (
+    "verified_eligible_event_not_promoted_to_report_events"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +39,7 @@ class ReportRunResult:
     was_replayed: bool
     included_count: int
     excluded_count: int
+    audit_discrepancy: str | None = None
 
 
 def _utc(value: datetime, name: str) -> datetime:
@@ -159,6 +167,61 @@ def _has_canonical_source_url(con: sqlite3.Connection, event_id: str, version: i
     return row is not None
 
 
+def _has_schema_v7(con: sqlite3.Connection) -> bool:
+    return con.execute(
+        "SELECT 1 FROM schema_migrations WHERE version=7"
+    ).fetchone() is not None
+
+
+def _has_verified_claims_and_provenance(
+    con: sqlite3.Connection, event_id: str, version: int
+) -> bool:
+    """Require v7 event links to retain the verified promotion evidence."""
+    rows = con.execute(
+        """SELECT ec.claim_id,c.status
+             FROM event_claims ec
+             JOIN claims c ON c.claim_id=ec.claim_id
+            WHERE ec.event_id=? AND ec.event_version=?
+            ORDER BY ec.claim_id""",
+        (event_id, version),
+    ).fetchall()
+    if not rows:
+        return False
+    if not _has_schema_v7(con):
+        return True
+    if any(row[1] != VerificationState.VERIFIED.value for row in rows):
+        return False
+    all_evidence: list[dict[str, object]] = []
+    for claim_id, _status in rows:
+        evidence = con.execute(
+            """SELECT ce.evidence_role,sp.effective_source_role,
+                      sp.independence_group,sp.authority_match
+                 FROM claim_evidence ce
+                 LEFT JOIN source_item_provenance sp ON sp.source_item_id=ce.source_item_id
+                WHERE ce.claim_id=? ORDER BY ce.evidence_id""",
+            (claim_id,),
+        ).fetchall()
+        if not evidence or any(
+            type(row[1]) is not str
+            or not row[1].strip()
+            or type(row[2]) is not str
+            or not row[2].strip()
+            or type(row[3]) is not int
+            for row in evidence
+        ):
+            return False
+        all_evidence.extend(
+            {
+                "role": row[0],
+                "effective_source_role": row[1],
+                "independence_group": row[2],
+                "authority_match": bool(row[3]),
+            }
+            for row in evidence
+        )
+    return verify_evidence(tuple(all_evidence)) is VerificationState.VERIFIED
+
+
 def _latest_events(con: sqlite3.Connection, lower: str, upper: str) -> list[tuple[str, int, str, str, str, str]]:
     rows = con.execute("""
         SELECT ev.event_id, ev.version, ev.summary, e.category, ev.valid_from,
@@ -182,6 +245,8 @@ def _latest_events(con: sqlite3.Connection, lower: str, upper: str) -> list[tupl
             continue
         if not _has_canonical_source_url(con, row[0], row[1]):
             continue
+        if not _has_verified_claims_and_provenance(con, row[0], row[1]):
+            continue
         checked.append(row)
     return sorted(checked, key=lambda row: (_parse_z(row[4], "valid_from"), row[0], row[1]))
 
@@ -201,6 +266,8 @@ def _items_from_links(con: sqlite3.Connection, report_id: str) -> list[tuple[str
         if row[5].strip().casefold() == "retraction":
             continue
         if not _has_canonical_source_url(con, row[0], row[1]):
+            continue
+        if not _has_verified_claims_and_provenance(con, row[0], row[1]):
             continue
         checked.append(row)
     return checked
@@ -240,6 +307,7 @@ def _item_dict(con: sqlite3.Connection, row: tuple[str, int, str, str, str, str]
         "title": summary[:256],
         "summary": summary,
         "category": category,
+        "subject_id": subject_for_category(category).value,
         "url": source_urls[0] if source_urls else None,
         "source_urls": list(source_urls),
         "event_date": date_row[0] if date_row else None,
@@ -266,14 +334,25 @@ def _sections(items: tuple[dict[str, Any], ...]) -> dict[str, Any]:
     return {"corrections": corrections, "retractions": [], "leads": []}
 
 
-def _health(items: tuple[dict[str, Any], ...]) -> dict[str, Any]:
+def _health(
+    items: tuple[dict[str, Any], ...],
+    audit_discrepancy: str | None = None,
+) -> dict[str, Any]:
+    reasons: list[str] = []
+    if audit_discrepancy is not None:
+        reasons.append(audit_discrepancy)
     if items:
+        reasons.append("deterministic_pass_through")
         return {
             "status": "degraded",
             "degraded": True,
-            "reasons": ["deterministic_pass_through"],
+            "reasons": reasons,
         }
-    return {"status": "healthy", "degraded": False, "reasons": []}
+    return {
+        "status": "degraded" if reasons else "healthy",
+        "degraded": bool(reasons),
+        "reasons": reasons,
+    }
 
 
 def _report_payload(
@@ -282,6 +361,7 @@ def _report_payload(
     generated: str,
     report_id: str,
     items: tuple[dict[str, Any], ...],
+    audit_discrepancy: str | None = None,
 ) -> ReportArtifacts:
     return ReportArtifacts(
         window_start=lower,
@@ -289,7 +369,7 @@ def _report_payload(
         generated_at_utc=generated,
         report_id=report_id,
         items=items,
-        health=_health(items),
+        health=_health(items, audit_discrepancy),
         sections=_sections(items),
         counts={"items": len(items)},
     )
@@ -322,7 +402,7 @@ def _verify_complete(
     root: ArtifactRoot,
     lower: str,
     upper: str,
-) -> tuple[ArtifactResult, int]:
+) -> tuple[ArtifactResult, int, str | None]:
     expected_id = _report_id(lower, upper)
     if row["report_id"] != expected_id:
         raise ArtifactMismatch("complete report identity mismatch")
@@ -349,12 +429,18 @@ def _verify_complete(
         raise ArtifactMismatch("persisted report JSON must be an object")
     linked_rows = _items_from_links(con, expected_id)
     links = tuple(_item_dict(con, item) for item in linked_rows)
+    qualifying_count = len(_latest_events(con, lower, upper))
+    audit_discrepancy = (
+        REPORT_EVENTS_PROMOTION_DISCREPANCY
+        if qualifying_count > 0 and not linked_rows
+        else None
+    )
     expected_links = [
         (
             expected_id,
             item["event_id"],
             item["event_version"],
-            item["category"],
+            item["subject_id"],
             ordinal,
             "verified_event",
         )
@@ -372,7 +458,9 @@ def _verify_complete(
         raise ArtifactMismatch("complete report_events metadata does not match report items")
     if tuple(persisted.get("items", ())) != links:
         raise ArtifactMismatch("persisted report items do not match report_events")
-    report = _report_payload(lower, upper, generated, expected_id, links)
+    report = _report_payload(
+        lower, upper, generated, expected_id, links, audit_discrepancy
+    )
     result = verify_artifacts(root, report)
     hashes = (
         result.json_sha256,
@@ -382,7 +470,7 @@ def _verify_complete(
     )
     if hashes != stored:
         raise ArtifactMismatch("report table hash mismatch")
-    return result, len(links)
+    return result, len(links), audit_discrepancy
 
 
 def _recover_completed_events(
@@ -449,6 +537,8 @@ def _recover_completed_events(
             or not (_parse_z(lower, "window_start") < _parse_z(valid_from, "valid_from") <= _parse_z(upper, "window_end"))
         ):
             raise ArtifactMismatch(f"shadow candidate is no longer report-eligible: {candidate_id!r}")
+        if not _has_verified_claims_and_provenance(con, event_id, version):
+            raise ArtifactMismatch(f"shadow candidate lacks verified promotion evidence: {candidate_id!r}")
         decision = "distinct_event" if version == 1 else "material_update"
         payload = {
             "candidate_id": candidate_id,
@@ -483,7 +573,7 @@ def _reconcile_report_events(
             report_id,
             item["event_id"],
             item["event_version"],
-            item["category"],
+            item["subject_id"],
             ordinal,
             "verified_event",
         )
@@ -569,13 +659,24 @@ def run_report(
             if existing is None:
                 raise RuntimeError("generating report row was not persisted")
         if existing["generation_status"] == "complete":
-            result, count = _verify_complete(con, existing, root, lower, upper)
+            result, count, discrepancy = _verify_complete(
+                con, existing, root, lower, upper
+            )
             return ReportRunResult(
-                report_id, lower, upper, "complete", result, True, count, 0
+                report_id,
+                lower,
+                upper,
+                "complete",
+                result,
+                True,
+                count,
+                0,
+                discrepancy,
             )
         generated = _validate_generating_row(existing, report_id, lower, upper)
         run_as_of = _parse_z(generated, "created_at")
         excluded_count = 0
+        qualifying_count = 0
         if lower == upper:
             # The ledger contract intentionally rejects zero-width runs. A
             # watermark that already equals the current cutoff is nevertheless
@@ -584,6 +685,8 @@ def run_report(
         else:
             ledger = BriefingLedger(con)
             ledger.initialize_schema()
+            eligible_events = _latest_events(con, lower, upper)
+            qualifying_count = len(eligible_events)
             shadow = con.execute(
                 "SELECT status,window_lower_utc,window_upper_utc,started_at_utc "
                 "FROM shadow_briefing_runs WHERE run_id=?",
@@ -599,7 +702,6 @@ def run_report(
             if shadow is not None and shadow[0] == "COMPLETED":
                 events = _recover_completed_events(con, run_id, lower, upper)
             else:
-                eligible_events = _latest_events(con, lower, upper)
                 event_by_id = {
                     _candidate_id(row[0], row[1]): row for row in eligible_events
                 }
@@ -638,11 +740,23 @@ def run_report(
                     raise RuntimeError("shadow ledger did not reach COMPLETED")
 
         items = tuple(_item_dict(con, row) for row in events)
-        report = _report_payload(lower, upper, generated, report_id, items)
-        artifacts = compute_artifacts(root, report)
         con.execute("BEGIN IMMEDIATE")
         try:
             _reconcile_report_events(con, report_id, items)
+            linked_count = con.execute(
+                "SELECT COUNT(*) FROM report_events WHERE report_id=?",
+                (report_id,),
+            ).fetchone()[0]
+            audit_discrepancy = (
+                REPORT_EVENTS_PROMOTION_DISCREPANCY
+                if qualifying_count > 0 and linked_count == 0
+                else None
+            )
+            report_items = () if audit_discrepancy is not None else items
+            report = _report_payload(
+                lower, upper, generated, report_id, report_items, audit_discrepancy
+            )
+            artifacts = compute_artifacts(root, report)
             cursor = con.execute(
                 "UPDATE reports SET json_sha256=?,jsonl_sha256=?,markdown_sha256=?,"
                 "manifest_sha256=?,generation_status='complete',delivery_state='dry_run',"
@@ -666,7 +780,9 @@ def run_report(
         completed_row = _existing(con, lower, upper)
         if completed_row is None:
             raise RuntimeError("completed report row disappeared")
-        verified, count = _verify_complete(con, completed_row, root, lower, upper)
+        verified, count, discrepancy = _verify_complete(
+            con, completed_row, root, lower, upper
+        )
         return ReportRunResult(
             report_id,
             lower,
@@ -676,6 +792,7 @@ def run_report(
             False,
             count,
             excluded_count,
+            discrepancy,
         )
     finally:
         con.close()

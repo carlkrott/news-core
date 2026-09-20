@@ -283,6 +283,8 @@ def map_eligibility(inp: BriefingInput) -> EligibilityResult:
             f"map_eligibility decision must be SemanticDecision, got "
             f"{decision!r} (type={type(decision).__name__})"
         )
+    if inp.subject_suppressed:
+        return _exclude(inp)
     if decision is SemanticDecision.distinct_event:
         return _include(inp)
     if decision is SemanticDecision.material_update:

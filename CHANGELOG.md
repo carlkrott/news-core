@@ -37,6 +37,13 @@ All notable changes to the public news-core source are recorded here.
   audit preservation of later payloads.  Public workers remain
   delivery-disabled; this structural change performs no live migration or
   schedule activation.
+- Added Run 6 verification-to-report promotion repair: persisted publisher
+  provenance reaches every evidence evaluation, verified event versions
+  reconcile into subject-scoped `report_events`, and silent promotion gaps
+  become typed audit discrepancies.  Unverified, watchlist, rejected, and
+  superseded versions remain excluded.  Public workers remain
+  delivery-disabled; this structural change performs no live migration or
+  schedule activation.
 
 ## [0.1.0] - 2026-09-15
 
