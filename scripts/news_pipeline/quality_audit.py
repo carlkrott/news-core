@@ -259,6 +259,33 @@ def audit_database(
             "subject_outbox": _group_counts(connection, "subject_delivery_outbox", "state"),
             "subject_attempts": _group_counts(connection, "subject_delivery_attempts", "state"),
         }
+        has_generation_receipts = _table_exists(
+            connection, "subject_generation_receipts"
+        )
+        db_model_fallback = (
+            _scalar(
+                connection,
+                "SELECT COALESCE(SUM(fallback_count),0) FROM subject_generation_receipts",
+            )
+            if has_generation_receipts
+            else None
+        )
+        db_model_malformed = (
+            _scalar(
+                connection,
+                "SELECT COALESCE(SUM(malformed_count),0) FROM subject_generation_receipts",
+            )
+            if has_generation_receipts
+            else None
+        )
+        db_transport_errors = (
+            _scalar(
+                connection,
+                "SELECT COALESCE(SUM(transport_error_count),0) FROM subject_generation_receipts",
+            )
+            if has_generation_receipts
+            else None
+        )
 
         unavailable: list[str] = []
         sources: dict[str, str] = {
@@ -280,20 +307,25 @@ def audit_database(
             subject_rejects = None
             collisions = db_collisions
             repeats = shadow_repeats
-            model_fallback = None
-            model_malformed = None
+            model_fallback = db_model_fallback
+            model_malformed = db_model_malformed
             query_errors = db_query_errors
-            transport_errors = None
+            transport_errors = db_transport_errors
             unavailable.extend(
                 (
                     "canonical_url_non_article",
                     "date_evidence_unparseable",
                     "subject_relevance_reject_count",
-                    "model_fallback_count",
-                    "model_malformed_count",
-                    "transport_error_count",
                 )
             )
+            if not has_generation_receipts:
+                unavailable.extend(
+                    (
+                        "model_fallback_count",
+                        "model_malformed_count",
+                        "transport_error_count",
+                    )
+                )
             for name in (
                 "candidates_returned", "stale_rejection_count", "exact_duplicate_count",
                 "rewrite_count", "distinct_event_count", "material_update_count",
@@ -303,6 +335,10 @@ def audit_database(
                 sources[name] = "db"
             sources["canonical_url_coverage"] = "db_partial"
             sources["date_evidence_coverage"] = "db_partial"
+            if has_generation_receipts:
+                sources["model_fallback_count"] = "db"
+                sources["model_malformed_count"] = "db"
+                sources["transport_error_count"] = "db"
             for name in unavailable:
                 sources[name] = "unavailable"
         else:
@@ -370,9 +406,10 @@ def audit_database(
                 "canonical URL and date coverage aggregates",
                 "normalized semantic decision metrics",
                 "subject relevance and collision receipts",
-                "summarizer fallback and malformed aggregates",
                 "investigation per-query error details",
-            ),
+            ) + (() if has_generation_receipts else (
+                "summarizer fallback and malformed aggregates",
+            )),
             sources=sources,
             integrity_check=integrity,
             foreign_key_violation_count=fk_count,

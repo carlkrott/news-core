@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import sys
 import tempfile
+import types
 import unittest
 from argparse import Namespace
 from contextlib import redirect_stdout
@@ -70,6 +73,7 @@ class Run8QueueSplitTests(unittest.TestCase):
                     "news_pipeline.delivery.deliver_report",
                     side_effect=AssertionError("generation called delivery"),
                 ) as deliver,
+                patch.object(jobs, "_validate_daily_report_schema"),
                 patch.object(jobs, "_resolve_report_prior", return_value=None),
                 redirect_stdout(output),
             ):
@@ -80,6 +84,79 @@ class Run8QueueSplitTests(unittest.TestCase):
             self.assertEqual(payload["delivery_state"], "not_attempted")
             self.assertFalse(payload["network_used"])
             self.assertEqual(payload["message_count"], 0)
+
+    def test_report_generation_injects_private_subject_summarizer_factory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = root / "state.db"
+            db.touch()
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            args = Namespace(
+                job="daily-report",
+                db=str(db),
+                artifact_root=str(artifacts),
+                as_of_utc="2026-09-20T12:00:00Z",
+                prior_upper_utc=None,
+            )
+            summarizer = SimpleNamespace(
+                summarize_subject=lambda _subject, _inputs: None,
+                model_call_count=0,
+                cache_hit_count=0,
+            )
+            private_module = types.ModuleType("news_private.subject_adapter")
+            private_module.build = lambda: summarizer
+            report_result = SimpleNamespace(
+                report_id="report-1",
+                generation_status="complete",
+                was_replayed=False,
+            )
+            def generate_report(*_args: object, **_kwargs: object) -> object:
+                summarizer.model_call_count += 1
+                return report_result
+
+            output = io.StringIO()
+            with (
+                patch.dict(
+                    sys.modules,
+                    {"news_private.subject_adapter": private_module},
+                ),
+                patch.dict(
+                    os.environ,
+                    {
+                        "NEWS_SUBJECT_SUMMARIZER_FACTORY":
+                            "news_private.subject_adapter:build"
+                    },
+                    clear=False,
+                ),
+                patch(
+                    "news_pipeline.report_builder.run_report",
+                    side_effect=generate_report,
+                ) as generate,
+                patch.object(jobs, "_validate_daily_report_schema"),
+                patch.object(jobs, "_resolve_report_prior", return_value=None),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(jobs._run_daily_report(args), 0)
+            generate.assert_called_once_with(
+                db,
+                artifacts,
+                unittest.mock.ANY,
+                last_completed_upper_utc=None,
+                summarizer=summarizer,
+            )
+            self.assertTrue(json.loads(output.getvalue())["network_used"])
+
+    def test_report_generation_rejects_factory_outside_private_namespace(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"NEWS_SUBJECT_SUMMARIZER_FACTORY": "arbitrary_module:build"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "must be news_private.module.path:function"
+            ):
+                jobs._load_subject_summarizer()
 
     def test_operator_delivery_job_never_generates_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

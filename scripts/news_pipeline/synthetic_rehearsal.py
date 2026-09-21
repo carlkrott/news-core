@@ -36,7 +36,7 @@ from .schema_v5 import migrate_v5
 from .schema_v7 import migrate_v7
 from .schema_v8 import migrate_v8
 from .schema_v9 import migrate_v9
-from .subject_delivery import prepare_subject_report
+from .schema_v10 import migrate_v10
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,6 +326,7 @@ def _run_rehearsal(
     migrate_v7(connection, as_of_utc, rules=(_rule(),))
     migrate_v8(connection, as_of_utc)
     migrate_v9(connection, as_of_utc)
+    migrate_v10(connection, as_of_utc)
 
     lane_id = stable_feed_lane_id("source-search", "ai", "synthetic evidence", ("general",))
     search_queries = json.dumps(
@@ -453,7 +454,8 @@ def _run_rehearsal(
         raise ValueError("investigation replay unexpectedly used transport")
 
     process_phase4(str(db_path), run_at_utc)
-    first_report = run_report(str(db_path), artifact_root, as_of)
+    session = SummarizerSession(_editorial_transport)
+    first_report = run_report(str(db_path), artifact_root, as_of, summarizer=session)
     connection = connections.connect(db_path)
     connection.execute("PRAGMA foreign_keys=ON")
     event_id, event_version, summary = connection.execute(
@@ -467,17 +469,12 @@ def _run_rehearsal(
         event_id=str(event_id), event_version=int(event_version), title=str(summary),
         source_url=str(fresh.canonical_url),
     )
-    session = SummarizerSession(_editorial_transport)
-    editorial = session.summarize_subject(Subject.AI, (editorial_input,))
-    if not editorial.items or editorial.items[0].source is SummarySource.FALLBACK:
-        raise ValueError("verified editorial fixture unexpectedly fell back")
-    first_subject = prepare_subject_report(
-        connection,
-        parent_report_id=first_report.report_id,
-        subject=Subject.AI,
-        rendered_text=editorial.items[0].summary + "\n",
-        story_count=1,
-        created_at=run_at_utc,
+    first_subject_report_id = str(
+        connection.execute(
+            """SELECT subject_report_id FROM subject_reports
+                 WHERE parent_report_id=? AND subject_id='ai'""",
+            (first_report.report_id,),
+        ).fetchone()[0]
     )
     contaminated = SummarizerSession(_contaminated_transport).summarize_subject(
         Subject.AI, (editorial_input,)
@@ -495,19 +492,20 @@ def _run_rehearsal(
     connections.close(connection)
 
     process_phase4(str(db_path), run_at_utc)
-    replay_report = run_report(str(db_path), artifact_root, as_of)
+    replay_report = run_report(
+        str(db_path), artifact_root, as_of,
+        summarizer=SummarizerSession(_editorial_transport),
+    )
     connection = connections.connect(db_path)
     connection.execute("PRAGMA foreign_keys=ON")
-    replay_editorial = session.summarize_subject(Subject.AI, (editorial_input,))
-    replay_subject = prepare_subject_report(
-        connection,
-        parent_report_id=replay_report.report_id,
-        subject=Subject.AI,
-        rendered_text=replay_editorial.items[0].summary + "\n",
-        story_count=1,
-        created_at=run_at_utc,
+    replay_subject_report_id = str(
+        connection.execute(
+            """SELECT subject_report_id FROM subject_reports
+                 WHERE parent_report_id=? AND subject_id='ai'""",
+            (replay_report.report_id,),
+        ).fetchone()[0]
     )
-    if replay_subject.report.subject_report_id != first_subject.report.subject_report_id:
+    if replay_subject_report_id != first_subject_report_id:
         raise ValueError("identical subject replay changed identity")
     after_replay = _counts(connection)
     claim_ids = tuple(
@@ -535,29 +533,12 @@ def _run_rehearsal(
     connections.close(connection)
 
     material_as_of = as_of + timedelta(days=1)
-    material_report = run_report(str(db_path), artifact_root, material_as_of)
+    material_report = run_report(
+        str(db_path), artifact_root, material_as_of,
+        summarizer=SummarizerSession(_editorial_transport),
+    )
     connection = connections.connect(db_path)
     connection.execute("PRAGMA foreign_keys=ON")
-    updated_event = connection.execute(
-        """SELECT re.event_id,re.event_version,ev.summary
-             FROM report_events re JOIN event_versions ev
-               ON ev.event_id=re.event_id AND ev.version=re.event_version
-            WHERE re.report_id=?""",
-        (material_report.report_id,),
-    ).fetchone()
-    updated_input = _editorial_input(
-        event_id=str(updated_event[0]), event_version=int(updated_event[1]),
-        title=str(updated_event[2]), source_url=str(fresh.canonical_url),
-    )
-    updated_editorial = session.summarize_subject(Subject.AI, (updated_input,))
-    prepare_subject_report(
-        connection,
-        parent_report_id=material_report.report_id,
-        subject=Subject.AI,
-        rendered_text=updated_editorial.items[0].summary + "\n",
-        story_count=1,
-        created_at=_z(material_as_of),
-    )
     after_material = _counts(connection)
     unverified_versions = int(
         connection.execute(

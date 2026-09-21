@@ -82,24 +82,292 @@ def _policy(category: Category) -> QueryPolicy:
 class _PassThroughSummarizer:
     model_call_count = 0
     cache_hit_count = 0
+
     def summarize_category(self, category: Category, raw_inputs: Sequence[Any]) -> Any:
-        from .briefing_summarizer import CategorySummaryResult, SummaryItem, SummarySource, SummarizerErrorCategory
-        return CategorySummaryResult(items=tuple(SummaryItem(candidate_id=x.candidate_id, summary=x.snippet or x.title, source=SummarySource.FALLBACK, error_category=SummarizerErrorCategory.INPUT_BOUNDS) for x in raw_inputs), model_used=False, cache_hit=False)
+        from .briefing_summarizer import (
+            CategorySummaryResult,
+            SummarizerErrorCategory,
+            SummaryItem,
+            SummarySource,
+        )
+
+        return CategorySummaryResult(
+            items=tuple(
+                SummaryItem(
+                    candidate_id=item.candidate_id,
+                    summary=item.snippet or item.title,
+                    source=SummarySource.FALLBACK,
+                    error_category=SummarizerErrorCategory.INPUT_BOUNDS,
+                )
+                for item in raw_inputs
+            ),
+            model_used=False,
+            cache_hit=False,
+        )
 
 
 class _Renderer:
     def __init__(self) -> None:
         self.calls = 0
-    def render_briefing(self, records: Sequence[Any], upper_bound_utc: datetime) -> RenderResult:
+        self.subject_chunks: dict[Subject, tuple[str, ...]] = {}
+        self.subject_records: dict[Subject, tuple[Any, ...]] = {}
+    def render_briefing(
+        self,
+        records: Sequence[Any],
+        upper_bound_utc: datetime,
+        subject_id: str | None = None,
+    ) -> RenderResult:
         from .briefing_renderer import render_briefing
         self.calls += 1
-        return render_briefing(records, upper_bound_utc)
+        result = render_briefing(
+            records, upper_bound_utc, subject_id=subject_id
+        )
+        if subject_id is not None:
+            subject = Subject(subject_id)
+            self.subject_chunks[subject] = result.chunks
+            self.subject_records[subject] = tuple(records)
+        return result
 
 
-def _briefing_input(event_id: str, version: int, summary: str, category: Category, valid_from: str) -> BriefingInput:
+class _CapturingSummarizer:
+    def __init__(self, delegate: Any) -> None:
+        self._delegate = delegate
+        self.subject_items: dict[Subject, tuple[Any, ...]] = {}
+
+    @property
+    def model_call_count(self) -> int:
+        return int(self._delegate.model_call_count)
+
+    @property
+    def cache_hit_count(self) -> int:
+        return int(self._delegate.cache_hit_count)
+
+    def summarize_subject(self, subject: Subject, raw_inputs: Sequence[Any]) -> Any:
+        result = self._delegate.summarize_subject(subject, raw_inputs)
+        items = tuple(result.items)
+        existing = self.subject_items.get(subject)
+        if existing is not None and existing != items:
+            raise ArtifactMismatch("subject summarizer produced conflicting repeated output")
+        self.subject_items[subject] = items
+        return result
+
+    def summarize_category(self, category: Category, raw_inputs: Sequence[Any]) -> Any:
+        return self._delegate.summarize_category(category, raw_inputs)
+
+
+def _subject_schema_available(con: sqlite3.Connection) -> bool:
+    return con.execute(
+        "SELECT 1 FROM schema_migrations WHERE version=10"
+    ).fetchone() is not None
+
+
+def _default_subject_summarizer() -> Any:
+    from .briefing_summarizer import SummarizerSession, SummarizerTransportError
+
+    def unavailable_transport(_request: bytes) -> bytes:
+        raise SummarizerTransportError("subject model transport is not configured")
+
+    return SummarizerSession(unavailable_transport)
+
+
+def _generation_receipts(grouped: dict[Subject, list[Any]]) -> dict[Subject, Any]:
+    from .briefing_summarizer import (
+        SummarizerErrorCategory,
+        SummarySource,
+    )
+    from .subject_artifacts import SubjectGeneration
+
+    receipts = {}
+    for subject, summaries in grouped.items():
+        fallback_count = sum(
+            item.source is SummarySource.FALLBACK for item in summaries
+        )
+        malformed_count = sum(
+            item.error_category is SummarizerErrorCategory.MALFORMED_OUTPUT
+            for item in summaries
+        )
+        transport_error_count = sum(
+            item.error_category is SummarizerErrorCategory.TRANSPORT_ERROR
+            for item in summaries
+        )
+        cache_hit = int(any(item.source is SummarySource.CACHE for item in summaries))
+        model_call = int(
+            any(item.source is SummarySource.MODEL for item in summaries)
+            or malformed_count > 0
+            or transport_error_count > 0
+        )
+        if fallback_count:
+            mode = "fallback"
+        elif cache_hit:
+            mode = "cache"
+        else:
+            mode = "model"
+        receipts[subject] = SubjectGeneration(
+            mode=mode,
+            model_call_count=model_call,
+            cache_hit_count=cache_hit,
+            fallback_count=fallback_count,
+            malformed_count=malformed_count,
+            transport_error_count=transport_error_count,
+        )
+    return receipts
+
+
+def _subject_generations_from_capture(
+    renderer: _Renderer,
+    summarizer: _CapturingSummarizer,
+) -> dict[Subject, Any]:
+    from .briefing_summarizer import (
+        SummarizerErrorCategory,
+        SummaryItem,
+        SummarySource,
+    )
+
+    grouped: dict[Subject, list[Any]] = {}
+    for subject, records in renderer.subject_records.items():
+        captured = {
+            item.candidate_id: item for item in summarizer.subject_items.get(subject, ())
+        }
+        summaries = []
+        for record in records:
+            record_identity = (
+                event_version_identity(
+                    subject.value, record.event_id, record.event_version
+                )
+                if record.event_id is not None and record.event_version is not None
+                else record.candidate_id
+            )
+            item = captured.get(record_identity)
+            if item is None:
+                item = SummaryItem(
+                    candidate_id=record_identity,
+                    summary=record.summary,
+                    source=SummarySource.FALLBACK,
+                    error_category=SummarizerErrorCategory.INPUT_BOUNDS,
+                )
+            summaries.append(item)
+        grouped[subject] = summaries
+    return _generation_receipts(grouped)
+
+
+class _SubjectBundleLedger:
+    def __init__(
+        self,
+        delegate: BriefingLedger,
+        *,
+        root: ArtifactRoot,
+        parent_report_id: str,
+        created_at: str,
+        renderer: _Renderer,
+        summarizer: _CapturingSummarizer,
+    ) -> None:
+        self._delegate = delegate
+        self._root = root
+        self._parent_report_id = parent_report_id
+        self._created_at = created_at
+        self._renderer = renderer
+        self._summarizer = summarizer
+        self._completing = False
+        self.subject_artifacts: tuple[Any, ...] = ()
+
+    def begin_run(self, run_id: str, lower: str, upper: str, started: str) -> None:
+        self._delegate.begin_run(run_id, lower, upper, started)
+
+    def seen_candidate_ids(self, ids: tuple[str, ...]) -> tuple[str, ...]:
+        return self._delegate.seen_candidate_ids(ids)
+
+    def complete_run(self, run_id: str, updated: str, events: Sequence[Any]) -> Any:
+        from .subject_artifact_bundle import (
+            publish_subject_artifact_bundle,
+            write_subject_artifact_bundle,
+        )
+
+        self._completing = True
+        story_counts = {subject: 0 for subject in Subject}
+        for event in events:
+            if event.subject_id is None:
+                raise ArtifactMismatch("subject shadow event is missing subject identity")
+            story_counts[Subject(event.subject_id)] += 1
+        bundle = write_subject_artifact_bundle(
+            self._root,
+            parent_report_id=self._parent_report_id,
+            run_id=run_id,
+            updated_at=updated,
+            created_at=self._created_at,
+            subject_chunks=self._renderer.subject_chunks,
+            story_counts=story_counts,
+            subject_generations=_subject_generations_from_capture(
+                self._renderer, self._summarizer
+            ),
+            shadow_events=events,
+        )
+        result = self._delegate.complete_run(run_id, updated, events)
+        self.subject_artifacts = publish_subject_artifact_bundle(self._root, bundle)
+        self._completing = False
+        return result
+
+    def fail_run(self, run_id: str, updated: str, error_code: str) -> None:
+        if self._completing:
+            # Completion starts before the atomic bundle write. Suppressing the
+            # engine's best-effort fail transition guarantees that every
+            # completion-phase error leaves either RUNNING (retryable, with or
+            # without a bundle) or the already-COMPLETED ledger state. A
+            # legitimate execution therefore cannot produce FAILED + bundle.
+            return
+        self._delegate.fail_run(run_id, updated, error_code)
+
+
+def _persist_subject_reports(
+    con: sqlite3.Connection,
+    artifacts: Sequence[Any],
+) -> None:
+    from .subject_delivery import prepare_subject_report
+    from .subject_generation_receipts import record_subject_generation
+
+    for artifact in artifacts:
+        prepare_subject_report(
+            con,
+            parent_report_id=artifact.parent_report_id,
+            subject=artifact.subject,
+            rendered_text=artifact.rendered_text,
+            story_count=artifact.story_count,
+            created_at=artifact.created_at,
+        )
+        record_subject_generation(con, artifact)
+
+
+def _validate_bundle_artifacts(
+    artifacts: Sequence[Any],
+    *,
+    parent_report_id: str,
+    created_at: str,
+    items: Sequence[dict[str, Any]],
+) -> None:
+    story_counts = {subject: 0 for subject in Subject}
+    for item in items:
+        story_counts[Subject(str(item["subject_id"]))] += 1
+    if tuple(artifact.subject for artifact in artifacts) != tuple(Subject):
+        raise ArtifactMismatch("subject artifact bundle does not contain exact subject order")
+    for artifact in artifacts:
+        if (
+            artifact.parent_report_id != parent_report_id
+            or artifact.created_at != created_at
+            or artifact.story_count != story_counts[artifact.subject]
+        ):
+            raise ArtifactMismatch("subject artifact bundle conflicts with parent report items")
+
+
+def _briefing_input(
+    event_id: str,
+    version: int,
+    summary: str,
+    category: Category,
+    valid_from: str,
+    source_url: str,
+) -> BriefingInput:
     _parse_z(valid_from, "valid_from")
     candidate_id = f"ev:{event_id}:v{version}"
-    article = CandidateArticle(candidate_id=candidate_id, category=category, query_group=category.value, title=summary[:256] or "Event summary unavailable", snippet=summary[:2048] or "Event summary unavailable", original_url=None, canonical_url=None, published_at=valid_from, published_evidence="source", observed_at=valid_from, evaluated_at=valid_from)
+    article = CandidateArticle(candidate_id=candidate_id, category=category, query_group=category.value, title=summary[:256] or "Event summary unavailable", snippet=summary[:2048] or "Event summary unavailable", original_url=source_url, canonical_url=source_url, published_at=valid_from, published_evidence="source", observed_at=valid_from, evaluated_at=valid_from)
     filtered = FilterResult(candidate=article, decision=DecisionCode.KEEP, reasons=(ReasonCode.OK_KEEP,), matched_article_ids=(), matched_observation_ids=(), trust_tier=TrustTier.UNKNOWN, evaluated_publication_time=None, ordinal=0)
     ec = EventCandidate(candidate=article, filter_result=filtered, query_policy=_policy(category))
     decision = SemanticDecision.distinct_event if version == 1 else SemanticDecision.material_update
@@ -614,6 +882,7 @@ def run_report(
     as_of_utc: datetime,
     *,
     last_completed_upper_utc: datetime | None = None,
+    summarizer: Any | None = None,
 ) -> ReportRunResult:
     as_of = _utc(as_of_utc, "as_of_utc")
     prior = (
@@ -634,6 +903,7 @@ def run_report(
     con = sqlite3.connect(str(path), isolation_level=None, timeout=10)
     con.execute("PRAGMA foreign_keys=ON")
     try:
+        subject_mode = _subject_schema_available(con)
         report_id = _report_id(lower, upper)
         run_id = "report-run-" + hashlib.sha256(
             (lower + "\0" + upper).encode("utf-8")
@@ -662,6 +932,40 @@ def run_report(
             result, count, discrepancy = _verify_complete(
                 con, existing, root, lower, upper
             )
+            if subject_mode:
+                from .subject_artifact_bundle import (
+                    find_subject_artifact_bundle,
+                    publish_subject_artifact_bundle,
+                    write_subject_artifact_bundle,
+                )
+
+                linked_rows = _items_from_links(con, report_id)
+                replay_items = tuple(_item_dict(con, row) for row in linked_rows)
+                bundle = find_subject_artifact_bundle(root, report_id)
+                if bundle is None:
+                    if replay_items:
+                        raise ArtifactMismatch(
+                            "completed parent report lacks a durable subject artifact bundle"
+                        )
+                    bundle = write_subject_artifact_bundle(
+                        root,
+                        parent_report_id=report_id,
+                        run_id=run_id,
+                        updated_at=str(existing["created_at"]),
+                        created_at=str(existing["created_at"]),
+                        subject_chunks={},
+                        story_counts={},
+                        subject_generations={},
+                        shadow_events=(),
+                    )
+                _validate_bundle_artifacts(
+                    bundle.artifacts,
+                    parent_report_id=report_id,
+                    created_at=str(existing["created_at"]),
+                    items=replay_items,
+                )
+                subject_artifacts = publish_subject_artifact_bundle(root, bundle)
+                _persist_subject_reports(con, subject_artifacts)
             return ReportRunResult(
                 report_id,
                 lower,
@@ -677,14 +981,36 @@ def run_report(
         run_as_of = _parse_z(generated, "created_at")
         excluded_count = 0
         qualifying_count = 0
+        subject_artifacts: tuple[Any, ...] = ()
         if lower == upper:
             # The ledger contract intentionally rejects zero-width runs. A
             # watermark that already equals the current cutoff is nevertheless
             # a valid truthful empty report, so it has no shadow run at all.
             events = []
+            if subject_mode:
+                from .subject_artifact_bundle import (
+                    publish_subject_artifact_bundle,
+                    write_subject_artifact_bundle,
+                )
+                bundle = write_subject_artifact_bundle(
+                    root,
+                    parent_report_id=report_id,
+                    run_id=run_id,
+                    updated_at=generated,
+                    created_at=generated,
+                    subject_chunks={},
+                    story_counts={},
+                    subject_generations={},
+                    shadow_events=(),
+                )
+                subject_artifacts = publish_subject_artifact_bundle(root, bundle)
         else:
             ledger = BriefingLedger(con)
             ledger.initialize_schema()
+            from .subject_artifact_bundle import (
+                find_subject_artifact_bundle,
+                publish_subject_artifact_bundle,
+            )
             eligible_events = _latest_events(con, lower, upper)
             qualifying_count = len(eligible_events)
             shadow = con.execute(
@@ -699,8 +1025,39 @@ def run_report(
                 or shadow[3] != generated
             ):
                 raise ArtifactMismatch("cannot recover failed, stale, or conflicting shadow run")
+            bundle = find_subject_artifact_bundle(root, report_id) if subject_mode else None
             if shadow is not None and shadow[0] == "COMPLETED":
+                if subject_mode and bundle is None:
+                    raise ArtifactMismatch(
+                        "completed shadow run lacks a durable subject artifact bundle"
+                    )
+                if subject_mode:
+                    assert bundle is not None
+                    recovered_items = tuple(
+                        _item_dict(con, row)
+                        for row in _recover_completed_events(con, run_id, lower, upper)
+                    )
+                    _validate_bundle_artifacts(
+                        bundle.artifacts,
+                        parent_report_id=report_id,
+                        created_at=generated,
+                        items=recovered_items,
+                    )
+                    subject_artifacts = publish_subject_artifact_bundle(root, bundle)
                 events = _recover_completed_events(con, run_id, lower, upper)
+            elif subject_mode and bundle is not None:
+                if bundle.run_id != run_id or bundle.created_at != generated:
+                    raise ArtifactMismatch("subject artifact bundle conflicts with report run")
+                ledger.complete_run(run_id, bundle.updated_at, bundle.shadow_events)
+                events = _recover_completed_events(con, run_id, lower, upper)
+                recovered_items = tuple(_item_dict(con, row) for row in events)
+                _validate_bundle_artifacts(
+                    bundle.artifacts,
+                    parent_report_id=report_id,
+                    created_at=generated,
+                    items=recovered_items,
+                )
+                subject_artifacts = publish_subject_artifact_bundle(root, bundle)
             else:
                 event_by_id = {
                     _candidate_id(row[0], row[1]): row for row in eligible_events
@@ -714,18 +1071,41 @@ def run_report(
                         stamp -= timedelta(microseconds=1)
                     inputs.append(
                         _briefing_input(
-                            event_id, version, summary, Category(category), _z(stamp)
+                            event_id,
+                            version,
+                            summary,
+                            Category(category),
+                            _z(stamp),
+                            str(_item_dict(con, (event_id, version, summary, category, valid_from, _reason))["url"]),
                         )
                     )
+                renderer = _Renderer()
+                if subject_mode:
+                    engine_summarizer: Any = _CapturingSummarizer(
+                        summarizer or _default_subject_summarizer()
+                    )
+                    engine_ledger: Any = _SubjectBundleLedger(
+                        ledger,
+                        root=root,
+                        parent_report_id=report_id,
+                        created_at=generated,
+                        renderer=renderer,
+                        summarizer=engine_summarizer,
+                    )
+                else:
+                    engine_summarizer = _PassThroughSummarizer()
+                    engine_ledger = ledger
                 engine = run_shadow_briefing(
                     run_id=run_id,
                     briefing_inputs=tuple(inputs),
-                    ledger=ledger,
-                    summarizer=_PassThroughSummarizer(),
-                    renderer=_Renderer(),
+                    ledger=engine_ledger,
+                    summarizer=engine_summarizer,
+                    renderer=renderer,
                     as_of_utc=run_as_of,
                     last_completed_upper_utc=_parse_z(lower, "window_start"),
                 )
+                if subject_mode:
+                    subject_artifacts = engine_ledger.subject_artifacts
                 events = []
                 for included in engine.included_items:
                     event = event_by_id.get(included.briefing_input.candidate_id)
@@ -783,6 +1163,8 @@ def run_report(
         verified, count, discrepancy = _verify_complete(
             con, completed_row, root, lower, upper
         )
+        if subject_artifacts:
+            _persist_subject_reports(con, subject_artifacts)
         return ReportRunResult(
             report_id,
             lower,
