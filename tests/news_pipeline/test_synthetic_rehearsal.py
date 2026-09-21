@@ -19,12 +19,12 @@ class SyntheticRehearsalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             result = run_rehearsal(Path(temporary) / "run", as_of_utc=AS_OF)
         self.assertEqual(result.first_report_events, 1)
-        self.assertEqual(result.first_subject_reports, 1)
+        self.assertEqual(result.first_subject_reports, 7)
         self.assertEqual(result.replay_event_versions_added, 0)
         self.assertEqual(result.replay_reports_added, 0)
         self.assertEqual(result.replay_subject_reports_added, 0)
         self.assertEqual(result.material_event_versions_added, 1)
-        self.assertEqual(result.material_subject_reports_added, 1)
+        self.assertEqual(result.material_subject_reports_added, 7)
         self.assertEqual(result.updated_subjects, ("ai",))
         self.assertEqual(result.subject_delivery_attempts, 0)
         self.assertEqual(result.legacy_delivery_attempts, 0)
@@ -39,7 +39,10 @@ class SyntheticRehearsalTests(unittest.TestCase):
         self.assertEqual(result.negative_report_event_count, 0)
         self.assertEqual(result.negative_subject_report_count, 0)
         self.assertEqual(result.delivery_state_counts["legacy_reports"], {"dry_run": 2})
-        self.assertEqual(result.delivery_state_counts["subject_outbox"], {"prepared": 2})
+        self.assertEqual(
+            result.delivery_state_counts["subject_outbox"],
+            {"prepared": 2, "skipped": 12},
+        )
 
     def test_investigation_and_public_reports_are_replay_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:

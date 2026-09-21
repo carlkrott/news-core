@@ -6,7 +6,11 @@ import unittest
 from dataclasses import replace
 from decimal import Decimal
 
-from news_pipeline.claim_pipeline import claims_from_observation, observation_id_to_source_item_id
+from news_pipeline.claim_pipeline import (
+    claims_from_observation,
+    observation_from_source_item,
+    observation_id_to_source_item_id,
+)
 from news_pipeline.live_contracts import ObservationContract, ObservationKind, SourceRole
 
 
@@ -63,6 +67,27 @@ class ClaimPipelineTests(unittest.TestCase):
         self.assertEqual(rows.claims[0].predicate, "source_statement")
         self.assertEqual(rows.claims[0].object_value, "verbatim body")
         self.assertEqual(rows.evidence[0].exact_excerpt, "verbatim body")
+
+    def test_missing_publication_date_maps_reason_without_false_date_evidence(self):
+        observation = observation_from_source_item(
+            {
+                "source_item_id": "item-missing-date",
+                "source_id": "search",
+                "category": "world",
+                "original_url": "https://example.test/story",
+                "canonical_url": "https://example.test/story",
+                "publisher": "Example",
+                "retrieval_method": "searxng",
+                "raw_content_hash": "a" * 64,
+                "retrieved_at": "2026-09-21T00:00:00Z",
+                "published_at": None,
+                "updated_at": None,
+                "publication_evidence": "missing",
+            }
+        )
+        self.assertIsNone(observation.published_at)
+        self.assertIsNone(observation.publication_evidence)
+        self.assertEqual(observation.unknown_date_reason, "missing")
 
 
 if __name__ == "__main__":

@@ -3,13 +3,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
+
+
+_FACTORY_RE = re.compile(
+    r"news_private(?:\.[A-Za-z_][A-Za-z0-9_]*)+:[A-Za-z_][A-Za-z0-9_]*\Z"
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -71,6 +78,10 @@ def _parser() -> argparse.ArgumentParser:
 
     health = sub.add_parser("health")
     health.add_argument("--db", required=True)
+
+    migrate_v10 = sub.add_parser("migrate-v10")
+    _add_common_db(migrate_v10)
+    migrate_v10.add_argument("--applied-at", required=True)
     return parser
 
 
@@ -319,14 +330,64 @@ def _resolve_report_prior(
     return max((row[2] for row in parsed if row[2] < current_upper), default=None)
 
 
+def _load_subject_summarizer() -> Any | None:
+    binding = os.environ.get("NEWS_SUBJECT_SUMMARIZER_FACTORY", "").strip()
+    if not binding:
+        return None
+    if _FACTORY_RE.fullmatch(binding) is None:
+        raise ValueError(
+            "NEWS_SUBJECT_SUMMARIZER_FACTORY must be news_private.module.path:function"
+        )
+    module_name, factory_name = binding.split(":", 1)
+    module = importlib.import_module(module_name)
+    factory = getattr(module, factory_name, None)
+    if not callable(factory):
+        raise TypeError("subject summarizer factory is not callable")
+    summarizer = factory()
+    if not callable(getattr(summarizer, "summarize_subject", None)):
+        raise TypeError("subject summarizer does not implement summarize_subject")
+    for name in ("model_call_count", "cache_hit_count"):
+        value = getattr(summarizer, name, None)
+        if type(value) is not int or isinstance(value, bool) or value < 0:
+            raise TypeError(f"subject summarizer {name} must be a non-negative int")
+    return summarizer
+
+
+def _validate_daily_report_schema(db_path: str | Path) -> None:
+    from .schema_v10 import validate_v10
+
+    connection = sqlite3.connect(db_path, isolation_level=None, timeout=5.0)
+    try:
+        connection.execute("PRAGMA foreign_keys=ON")
+        validate_v10(connection)
+    except (ValueError, sqlite3.Error) as exc:
+        raise ValueError(f"schema v10 migration is required: {exc}") from exc
+    finally:
+        connection.close()
+
+
 def _run_daily_report(args: argparse.Namespace) -> int:
     try:
         as_of, prior = _report_args(args)
         if not Path(args.db).is_file() or not Path(args.artifact_root).is_dir():
             raise ValueError("--db must be a file and --artifact-root must be a directory")
+        _validate_daily_report_schema(args.db)
         prior = _resolve_report_prior(args.db, as_of, prior)
         from .report_builder import run_report
-        result = run_report(Path(args.db), Path(args.artifact_root), as_of, last_completed_upper_utc=prior)
+        summarizer = _load_subject_summarizer()
+        model_calls_before = (
+            summarizer.model_call_count if summarizer is not None else 0
+        )
+        kwargs: dict[str, Any] = {"last_completed_upper_utc": prior}
+        if summarizer is not None:
+            kwargs["summarizer"] = summarizer
+        result = run_report(
+            Path(args.db), Path(args.artifact_root), as_of, **kwargs
+        )
+        network_used = bool(
+            summarizer is not None
+            and summarizer.model_call_count > model_calls_before
+        )
     except Exception as exc:
         _json({"error": {"type": "runtime", "message": str(exc)}})
         return 1
@@ -337,7 +398,7 @@ def _run_daily_report(args: argparse.Namespace) -> int:
         "generation_status": result.generation_status,
         "was_replayed": result.was_replayed,
         "delivery_state": "not_attempted",
-        "network_used": False,
+        "network_used": network_used,
         "replayed": False,
         "message_count": 0,
     })
@@ -376,6 +437,35 @@ def _run_daily_deliver(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_migrate_v10(args: argparse.Namespace) -> int:
+    connection: sqlite3.Connection | None = None
+    try:
+        if not Path(args.db).is_file():
+            raise ValueError("--db must be a file")
+        applied_at = _parse_utc(args.applied_at, name="--applied-at")
+        from .schema_v10 import migrate_v10
+
+        connection = sqlite3.connect(args.db, isolation_level=None, timeout=5.0)
+        applied = migrate_v10(
+            connection,
+            applied_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        )
+    except Exception as exc:
+        _json({"error": {"type": "runtime", "message": str(exc)}})
+        return 1
+    finally:
+        if connection is not None:
+            connection.close()
+    _json({
+        "job": "migrate-v10",
+        "state": "completed",
+        "schema_version": 10,
+        "applied": applied,
+        "network_used": False,
+    })
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.job == "tick":
@@ -388,6 +478,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_daily_report(args)
     if args.job == "daily-deliver":
         return _run_daily_deliver(args)
+    if args.job == "migrate-v10":
+        return _run_migrate_v10(args)
     if args.job == "health":
         from .news_health import health_snapshot
         _json(health_snapshot(args.db))

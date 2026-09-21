@@ -89,6 +89,16 @@ def observation_from_source_item(row: Mapping[str, object]) -> ObservationContra
         if has_provenance
         else publisher.casefold()
     )
+    published_at = text("published_at", True)
+    raw_publication_evidence = text("publication_evidence", True)
+    publication_evidence = (
+        raw_publication_evidence if published_at is not None else None
+    )
+    unknown_date_reason = (
+        None
+        if published_at is not None
+        else (raw_publication_evidence or "missing")
+    )
     return ObservationContract(
         observation_id=text("source_item_id"), source_id=text("source_id"),
         category=text("category"), kind=ObservationKind.PARSED_ARTICLE,
@@ -97,8 +107,9 @@ def observation_from_source_item(row: Mapping[str, object]) -> ObservationContra
         raw_content_hash=text("raw_content_hash"), observed_at=text("retrieved_at"),
         external_id=text("external_id", True), author_handle=text("author_handle", True),
         title=text("title", True), body=text("body", True), raw=text("raw", True),
-        published_at=text("published_at", True), updated_at=text("updated_at", True),
-        publication_evidence=text("publication_evidence", True),
+        published_at=published_at, updated_at=text("updated_at", True),
+        publication_evidence=publication_evidence,
+        unknown_date_reason=unknown_date_reason,
         publisher_host=text("normalized_publisher_host", True),
         effective_source_role=effective_source_role,
         independence_group=independence_group,
