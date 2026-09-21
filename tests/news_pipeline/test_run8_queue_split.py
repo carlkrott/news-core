@@ -223,6 +223,14 @@ class Run8QueueSplitTests(unittest.TestCase):
         self.assertNotIn("ZEROCLAW_CONFIG", wrapper)
         self.assertNotIn("telegram-api-base", wrapper)
 
+    def test_tick_wrapper_discovers_sibling_private_provenance_overlay(self) -> None:
+        wrapper = (
+            Path(__file__).resolve().parents[2] / "bin" / "news-tick"
+        ).read_text(encoding="utf-8")
+        self.assertIn("DEFAULT_PROVENANCE", wrapper)
+        self.assertIn("news-provenance.toml", wrapper)
+        self.assertIn('dirname -- "$NEWS_PIPELINE_SOURCES"', wrapper)
+
 
 if __name__ == "__main__":
     unittest.main()
