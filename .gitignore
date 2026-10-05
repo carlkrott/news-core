@@ -11,6 +11,15 @@ dist/
 *.egg
 .eggs/
 
+# uv lock file
+uv.lock
+
+# Debug / development artifacts
+_debug_db.py
+
+# Egg-info for editable installs
+scripts/news_core.egg-info/
+
 # Test / tool caches
 .pytest_cache/
 .mypy_cache/

@@ -3,11 +3,40 @@ from __future__ import annotations
 import json
 import unittest
 
-from news_pipeline.verification import GroundingError, validate_model_output, verify_evidence
+from news_pipeline.verification import (
+    GroundingError,
+    authority_entity_matches,
+    claim_specific_evidence_row,
+    validate_model_output,
+    verify_evidence,
+)
 from news_pipeline.live_contracts import EvidenceRole, SourceRole, VerificationState
 
 
 class VerificationTests(unittest.TestCase):
+    def test_claim_specific_primary_requires_exact_named_subject_and_identity(self):
+        row = (
+            "supports", "primary", "cachyos-origin", 1, "cachyos-own-announce",
+            "cachyos.org", '["our_setup"]', '["CachyOS"]', "our_setup",
+        )
+        direct = claim_specific_evidence_row(row, "CachyOS")
+        self.assertTrue(direct["authority_match"])
+        self.assertEqual(verify_evidence([direct]), VerificationState.VERIFIED)
+
+        self.assertFalse(authority_entity_matches("2026", ["2026"]))
+        self.assertFalse(authority_entity_matches("2.4e3", ["2.4e3"]))
+        numeric = claim_specific_evidence_row(
+            row[:4] + (row[4], row[5], row[6], '["2026"]', row[8]), "2026"
+        )
+        self.assertFalse(numeric["authority_match"])
+        self.assertEqual(verify_evidence([numeric]), VerificationState.UNVERIFIED)
+
+        missing_identity = claim_specific_evidence_row(
+            row[:4] + (None, row[5], row[6], row[7], row[8]), "CachyOS"
+        )
+        self.assertEqual(missing_identity["effective_source_role"], "")
+        self.assertEqual(verify_evidence([missing_identity]), VerificationState.UNVERIFIED)
+
     def test_grounded_output_accepts_only_supplied_evidence(self):
         evidence = {"e1": "release v2.0 launched"}
         output = json.dumps({"decision": "verified", "confidence": 0.9, "summary": "release v2.0 launched", "evidence_ids": ["e1"], "facts": ["v2.0"]})

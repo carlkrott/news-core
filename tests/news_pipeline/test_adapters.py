@@ -687,6 +687,31 @@ class TestRssParseItems(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(item.raw_content_hash)
         self.assertEqual(item.source_role, "primary")
 
+    async def test_cross_day_duplicate_guid_is_stable_and_changed_entry_is_distinct(self) -> None:
+        async def fetch(title: str, body: str, retrieved_at: str):
+            xml = (
+                "<rss><channel><item><guid isPermaLink=\"false\">urn:story:1</guid>"
+                "<link>https://example.com/articles/one</link>"
+                "<pubDate>Wed, 23 Sep 2026 00:00:00 GMT</pubDate>"
+                f"<title>{title}</title><description>{body}</description>"
+                "</item></channel></rss>"
+            )
+            transport = FakeTransport(FetchResponse(
+                200, (("Content-Type", "application/rss+xml"),), xml.encode(),
+                "https://example.com/feed.xml",
+            ))
+            adapter = RssAdapter(
+                "rss-test", "example.com", "world", "discovery", transport=transport,
+            )
+            return await adapter.fetch_feed("https://example.com/feed.xml", retrieved_at=retrieved_at)
+
+        day_one = await fetch("Widget launches", "Version 2.0", "2026-09-24T00:00:00Z")
+        replay = await fetch("Widget launches", "Version 2.0", "2026-09-25T00:00:00Z")
+        changed = await fetch("Widget launches", "Version 2.1", "2026-09-25T00:00:00Z")
+        self.assertEqual(day_one.items[0].source_item_id, replay.items[0].source_item_id)
+        self.assertNotEqual(day_one.items[0].source_item_id, changed.items[0].source_item_id)
+        self.assertNotEqual(day_one.items[0].raw_content_hash, changed.items[0].raw_content_hash)
+
     async def test_rss_item_without_pubdate_has_null_published_at(self) -> None:
         fixture_xml = _load_text_fixture("phase2_rss_valid.xml")
         body = fixture_xml.encode("utf-8")
@@ -1064,7 +1089,24 @@ class TestContentTypeRejection(unittest.IsolatedAsyncioTestCase):
 
 
 class TestOversizedBody(unittest.IsolatedAsyncioTestCase):
-    """Test that oversized responses are rejected."""
+    """Test that the hard 2 MiB cap cannot be raised by a caller."""
+
+    async def test_requested_limit_cannot_raise_hard_cap(self) -> None:
+        body = b"x" * (2 * 1024 * 1024 + 1)
+        transport = FakeTransport(FetchResponse(
+            200, (("Content-Type", "application/json"),), body,
+            "https://searxng.example.com/search",
+        ))
+        adapter = SearxngAdapter(
+            "searxng-ai-main", "searxng.example.com", "ai", "discovery",
+            transport=transport,
+        )
+        result = await adapter.fetch(
+            "https://searxng.example.com/search", retrieved_at=RETRIEVED_AT,
+            max_response_bytes=3 * 1024 * 1024,
+        )
+        self.assertIsInstance(result.error, ResponseTooLargeError)
+        self.assertEqual(result.error.limit, 2 * 1024 * 1024)
 
     async def test_oversized_body_returns_error(self) -> None:
         large_body = b"x" * (2 * 1024 * 1024 + 1)
@@ -1253,7 +1295,7 @@ class TestNormalizedItemFields(unittest.TestCase):
             author_handle="Jane Doe",
             published_at="2026-09-06T09:00:00Z",
             updated_at="2026-09-06T11:00:00Z",
-            publication_evidence="metadata:2026-09-06T09:00:00Z",
+            publication_evidence="metadata",
             unknown_date_reason=None,
             body="Article body text.",
             raw="<raw/>",
@@ -1311,7 +1353,7 @@ class TestFetchRequestIsImmutable(unittest.TestCase):
     def test_fetch_request_is_frozen(self) -> None:
         req = FetchRequest("https://example.com", (), 15.0, 2 * 1024 * 1024)
         with self.assertRaises(AttributeError):
-            req.url = "https://other.com"
+            req.url = "https://api.example.com"
 
 
 class TestFetchResponseIsImmutable(unittest.TestCase):
@@ -1485,11 +1527,13 @@ class _ClosingResponse:
 class TestDefaultTransportClosure(unittest.IsolatedAsyncioTestCase):
     async def test_default_transport_is_not_bound_as_an_instance_method(self) -> None:
         response = _ClosingResponse()
+        opener = mock.Mock()
+        opener.open.return_value = response
         with mock.patch.object(
             adapter_base.urllib.request,
-            "urlopen",
-            return_value=response,
-        ):
+            "build_opener",
+            return_value=opener,
+        ) as build_opener:
             result = await SearxngAdapter(
                 "source",
                 "searxng.example.com",
@@ -1498,13 +1542,17 @@ class TestDefaultTransportClosure(unittest.IsolatedAsyncioTestCase):
             ).fetch_query("query", retrieved_at=RETRIEVED_AT)
         self.assertTrue(result.is_success)
         self.assertTrue(response.closed)
+        handler_type = build_opener.call_args.args[0]
+        self.assertIsNone(handler_type().redirect_request(None, None, 302, "Found", {}, "https://api.example.com"))
 
     async def test_response_closes_when_read_fails(self) -> None:
         response = _ClosingResponse(fail_read=True)
+        opener = mock.Mock()
+        opener.open.return_value = response
         with mock.patch.object(
             adapter_base.urllib.request,
-            "urlopen",
-            return_value=response,
+            "build_opener",
+            return_value=opener,
         ):
             result = await SearxngAdapter(
                 "source",

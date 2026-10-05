@@ -29,6 +29,7 @@ from .adapters.base import (
     Transport,
 )
 from .adapters.rss import RssAdapter
+from .adapters.github import GitHubReleaseAdapter
 from .adapters.searxng import SearxngAdapter
 from .live_contracts import (
     QuerySeed,
@@ -45,6 +46,8 @@ from .schema_v4 import V4_COLUMNS, V4_TABLES
 from .schema_v7 import V7_COLUMNS, V7_TABLES, backfill_source_item_provenance
 from .schema_v8 import V8_COLUMNS, V8_TABLES
 from .schema_v9 import V9_COLUMNS, V9_TABLES
+from .schema_v10 import V10_COLUMNS, V10_TABLES
+from .schema_v11 import V11_COLUMNS, V11_TABLES
 from .source_registry import load_registry
 from .models import subject_for_category
 
@@ -52,7 +55,7 @@ _GLOBAL_CONCURRENCY = 4
 _HOST_CONCURRENCY = 1
 _HOST_DELAY_SECONDS = 1.0
 _LEASE_SECONDS = 300
-_MAX_RETRIES = 2
+_MAX_RETRIES = 1
 _DEFAULT_RETRY_SECONDS = 300
 
 AsyncSleep = Callable[[float], Awaitable[None]]
@@ -248,12 +251,12 @@ async def run_ingest(
 
         jobs = _prepare_jobs(connection, claims, run_started_at)
         global_semaphore = asyncio.Semaphore(_GLOBAL_CONCURRENCY)
-        gates = {claim.source.host: _HostGate() for claim in claims}
+        gates = {_host_key(claim.source.host): _HostGate() for claim in claims}
         tasks = [
             asyncio.create_task(
                 _fetch_job(
                     job,
-                    gate=gates[job.source.host],
+                    gate=gates[_host_key(job.source.host)],
                     global_semaphore=global_semaphore,
                     transport_factory=transport_factory,
                     sleep=async_sleep,
@@ -316,10 +319,12 @@ def _verify_schema(db_path: Path) -> None:
                 {1, 2, 3, 4, 5, 6, 7},
                 {1, 2, 3, 4, 5, 6, 7, 8},
                 {1, 2, 3, 4, 5, 6, 7, 8, 9},
+                {1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+                {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
             )
             if markers not in accepted_markers:
                 raise ValueError(
-                    "database schema markers must be a known additive v4-v9 prefix, "
+                    "database schema markers must be a known additive v4-v11 prefix, "
                     f"got {sorted(markers)}"
                 )
             tables = {
@@ -342,6 +347,22 @@ def _verify_schema(db_path: Path) -> None:
                 expected_columns.update(V7_COLUMNS)
                 expected_columns.update(V8_COLUMNS)
                 expected_columns.update(V9_COLUMNS)
+            if markers == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}:
+                required |= set(V7_TABLES) | set(V8_TABLES) | set(V9_TABLES) | set(V10_TABLES)
+                expected_columns.update(V7_COLUMNS)
+                expected_columns.update(V8_COLUMNS)
+                expected_columns.update(V9_COLUMNS)
+                expected_columns.update(V10_COLUMNS)
+            if markers == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}:
+                required |= (
+                    set(V7_TABLES) | set(V8_TABLES) | set(V9_TABLES)
+                    | set(V10_TABLES) | set(V11_TABLES)
+                )
+                expected_columns.update(V7_COLUMNS)
+                expected_columns.update(V8_COLUMNS)
+                expected_columns.update(V9_COLUMNS)
+                expected_columns.update(V10_COLUMNS)
+                expected_columns.update(V11_COLUMNS)
             missing = sorted(required - tables)
             if missing:
                 raise ValueError(f"database is missing required tables: {missing}")
@@ -561,6 +582,9 @@ async def _fetch_job(
     elif job.source.adapter_type is SourceAdapter.RSS:
         adapter = RssAdapter(job.source, category=category, transport=transport)
         fetch = adapter.fetch_feed
+    elif job.source.adapter_type is SourceAdapter.GITHUB:
+        adapter = GitHubReleaseAdapter(job.source, category=category, transport=transport)
+        fetch = adapter.fetch_release
     else:
         return _NetworkOutcome(
             job,
@@ -593,7 +617,15 @@ async def _fetch_job(
             sleep=sleep,
             monotonic=monotonic,
         )
-        if not result.retryable:
+        error_status = getattr(result.error, "status", None)
+        if not (
+            result.retryable
+            and not (
+                result.rate_limit_remaining == 0
+                and result.rate_limit_reset is not None
+            )
+            and (error_status == 429 or (type(error_status) is int and 500 <= error_status < 600))
+        ):
             break
     assert result is not None
     return _NetworkOutcome(job, result, _validated_now(now), retries)
@@ -903,7 +935,11 @@ def _query_status(result: FetchResult, partial: bool) -> tuple[QueryStatus, str 
     if result.error is None:
         return (QueryStatus.PARTIAL if partial else QueryStatus.SUCCESS), None
     status = getattr(result.error, "status", None)
-    query_status = QueryStatus.RATE_LIMITED if status == 429 else QueryStatus.FAILED
+    query_status = (
+        QueryStatus.RATE_LIMITED
+        if status == 429 or (status == 403 and result.rate_limit_remaining == 0)
+        else QueryStatus.FAILED
+    )
     return query_status, _safe_error(result.error)
 
 
@@ -987,6 +1023,12 @@ def _retry_after_int(value: int | float | None) -> int | None:
     if value is None:
         return None
     return max(0, math.ceil(float(value)))
+
+
+def _host_key(value: str) -> str:
+    """Key host gates by DNS host, not config casing or an optional port."""
+    parsed = urlsplit(value if "://" in value else f"//{value}")
+    return (parsed.hostname or value).casefold().rstrip(".")
 
 
 def _parse_utc(value: str, field_name: str) -> datetime:

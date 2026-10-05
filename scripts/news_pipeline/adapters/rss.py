@@ -145,9 +145,12 @@ class RssAdapter(Adapter):
             evidence_prefix="feed-metadata",
         )
         raw = _bounded_xml(item)
+        updated_at = None
+        raw_hash = self._raw_hash(ET.tostring(item, encoding="utf-8", method="xml"))
         return NormalizedItem(
             source_item_id=stable_id(
-                "source-item", self.source_id, guid or canonical_url
+                "source-item", self.source_id, guid, canonical_url,
+                published_at, updated_at, raw_hash,
             ),
             source_id=self.source_id,
             external_id=guid,
@@ -157,7 +160,7 @@ class RssAdapter(Adapter):
             publisher=self._publisher_from_url(original_url),
             source_role=self.source_role,
             retrieval_method="rss-poll",
-            raw_content_hash=self._raw_hash(raw),
+            raw_content_hash=raw_hash,
             retrieved_at=retrieved_at,
             published_at=published_at,
             publication_evidence=evidence,
@@ -218,11 +221,13 @@ class RssAdapter(Adapter):
                 evidence_prefix="feed-metadata",
             )
         raw = _bounded_xml(entry)
+        raw_hash = self._raw_hash(ET.tostring(entry, encoding="utf-8", method="xml"))
         author_element = _first_child(entry, "author")
         author = _child_text(author_element, "name") if author_element is not None else None
         return NormalizedItem(
             source_item_id=stable_id(
-                "source-item", self.source_id, external_id or canonical_url
+                "source-item", self.source_id, external_id, canonical_url,
+                published_at, updated_at, raw_hash,
             ),
             source_id=self.source_id,
             external_id=external_id,
@@ -232,7 +237,7 @@ class RssAdapter(Adapter):
             publisher=self._publisher_from_url(original_url),
             source_role=self.source_role,
             retrieval_method="rss-poll",
-            raw_content_hash=self._raw_hash(raw),
+            raw_content_hash=raw_hash,
             retrieved_at=retrieved_at,
             published_at=published_at,
             updated_at=updated_at,

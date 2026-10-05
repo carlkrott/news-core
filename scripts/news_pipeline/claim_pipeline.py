@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal
@@ -13,12 +15,24 @@ from .live_contracts import (
     ClaimContract, ClaimStatus, EvidenceContract, EvidenceRole,
     ObservationContract, ObservationKind, SourceRole, stable_id,
 )
+from .verification import authority_entity_matches, lead_retrieval_reason
 
 
 @dataclass(frozen=True, slots=True)
 class ClaimRows:
     claims: tuple[ClaimContract, ...]
     evidence: tuple[EvidenceContract, ...]
+    observation: ObservationContract | None = None
+
+
+_MKINITCPIO_HOOK_UNIT_FACT = re.compile(
+    r"(?P<excerpt>Starting\s+with\s+package\s+version\s+"
+    r"(?P<version>\d{1,5}(?:\.\d{1,5})?-\d{1,5})\s*,\s*"
+    r"the\s+(?P<subject>mkinitcpio)\s+systemd\s+hook\s+now\s+includes\s+"
+    r"(?P<unit>[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)"
+    r"(?:\s+\([^()\r\n]{1,128}\))?\s*\.)",
+    re.IGNORECASE,
+)
 
 
 def observation_id_to_source_item_id(connection: sqlite3.Connection, observation_id: str) -> str:
@@ -56,6 +70,22 @@ adapt_claim_contract = claim_row
 adapt_evidence_contract = evidence_row
 
 
+def _json_string_tuple(name: str, value: object) -> tuple[str, ...]:
+    if value in (None, ""):
+        return ()
+    if type(value) is str:
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"source item {name} must be valid JSON") from exc
+    if type(value) not in (list, tuple) or any(type(item) is not str or not item.strip() for item in value):
+        raise ValueError(f"source item {name} must be an array of non-empty strings")
+    result = tuple(item.strip() for item in value)
+    if len(result) != len(set(result)):
+        raise ValueError(f"source item {name} must not contain duplicates")
+    return result
+
+
 def observation_from_source_item(row: Mapping[str, object]) -> ObservationContract:
     def text(name: str, optional: bool = False):
         value = row.get(name)
@@ -70,6 +100,11 @@ def observation_from_source_item(row: Mapping[str, object]) -> ObservationContra
         effective_source_role = SourceRole(role_value)
     except (TypeError, ValueError) as exc:
         raise ValueError("source item effective_source_role is invalid") from exc
+    retrieval_method = text("retrieval_method")
+    transport_reason = lead_retrieval_reason(retrieval_method)
+    transport_only = transport_reason is not None
+    if transport_only:
+        effective_source_role = SourceRole.DISCOVERY
     authority_value = row.get("authority_match")
     if authority_value is None:
         authority_value = False
@@ -114,8 +149,15 @@ def observation_from_source_item(row: Mapping[str, object]) -> ObservationContra
         effective_source_role=effective_source_role,
         independence_group=independence_group,
         matched_rule_id=text("matched_rule_id", True),
-        authority_match=bool(authority_value),
-        classification_reason=text("classification_reason", True) or "unknown_publisher",
+        authority_match=bool(authority_value) and not transport_only,
+        classification_reason=(
+            transport_reason
+            if transport_reason is not None
+            else text("classification_reason", True) or "unknown_publisher"
+        ),
+        authority_scope=_json_string_tuple("authority_scope_json", row.get("authority_scope_json")),
+        authority_entities=_json_string_tuple("authority_entities_json", row.get("authority_entities_json")),
+        classification_timestamp=text("classification_timestamp", True),
     )
 
 
@@ -126,15 +168,115 @@ def _fact_fields(fact: TypedFact) -> tuple[str, str, str]:
     return (fact.context[0] if fact.context else "source item", predicate, fact.value_normalized)
 
 
+def _first_party_mkinitcpio_fact(
+    observation: ObservationContract, *, extracted_at: str
+) -> tuple[ClaimContract, EvidenceContract, int] | None:
+    """Extract one tightly-scoped first-party mkinitcpio hook state change.
+
+    The full bounded body sentence must state the package-version transition,
+    name the exact approved claim entity, and identify the included systemd
+    unit. Feed metadata, headlines, specialist copies, and unscoped publishers
+    are deliberately ineligible.
+    """
+    if (
+        observation.retrieval_method != "publisher-article-fetch"
+        or observation.category != "our_setup"
+        or observation.effective_source_role is not SourceRole.PRIMARY
+        or observation.category not in observation.authority_scope
+        or not observation.publisher_host
+        or not observation.matched_rule_id
+        or not observation.independence_group
+        or observation.independence_group == "unknown"
+    ):
+        return None
+    body = observation.body or ""
+    match = _MKINITCPIO_HOOK_UNIT_FACT.search(body)
+    if match is None:
+        return None
+    subject = next(
+        (
+            entity
+            for entity in observation.authority_entities
+            if entity.strip().casefold() == match.group("subject").casefold()
+        ),
+        None,
+    )
+    if subject is None:
+        return None
+    excerpt = match.group("excerpt")
+    version = match.group("version")
+    unit = match.group("unit")
+    claim_id = stable_id(
+        "claim", observation.observation_id, "mkinitcpio_hook_unit",
+        version, unit, excerpt,
+    )
+    evidence_id = stable_id(
+        "evidence", claim_id, observation.observation_id, excerpt
+    )
+    claim = ClaimContract(
+        claim_id,
+        observation.observation_id,
+        subject,
+        "systemd_hook_includes_unit",
+        f"{unit} starting with package version {version}",
+        "state",
+        Decimal("0.9"),
+        ClaimStatus.PENDING,
+        extracted_at,
+    )
+    evidence = EvidenceContract(
+        evidence_id,
+        claim_id,
+        observation.observation_id,
+        EvidenceRole.SUPPORTS,
+        excerpt,
+        hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
+        observation.independence_group,
+        observation.observed_at,
+    )
+    return claim, evidence, match.start()
+
+
+def _is_leading_publication_date(
+    fact: TypedFact, observation: ObservationContract, material_fact_start: int
+) -> bool:
+    """Exclude a matching publication-date label, not a dated material fact."""
+    if fact.kind is not FactKind.DATE or not observation.published_at:
+        return False
+    publication_date = observation.published_at[:10]
+    return (
+        fact.value_normalized == publication_date
+        and 0 <= (position := (observation.body or "").find(fact.evidence)) < material_fact_start
+        and position < 512
+    )
+
+
 def claims_from_observation(observation: ObservationContract, *, extracted_at: str | None = None) -> ClaimRows:
     title, body = observation.title or "", observation.body or observation.raw or ""
     extracted = extract_facts(title, body)
-    facts = tuple(f for group in (extracted.dates, extracted.versions, extracted.prices,
-                                  extracted.percentages, extracted.counts) for f in group)
     when = extracted_at or observation.observed_at
+    first_party_fact = _first_party_mkinitcpio_fact(observation, extracted_at=when)
+    facts = tuple(
+        fact
+        for group in (
+            extracted.dates,
+            extracted.versions,
+            extracted.prices,
+            extracted.percentages,
+            extracted.counts,
+        )
+        for fact in group
+        if first_party_fact is None
+        or not _is_leading_publication_date(fact, observation, first_party_fact[2])
+    )
     claims: list[ClaimContract] = []
     evidence: list[EvidenceContract] = []
+    if first_party_fact is not None:
+        claims.append(first_party_fact[0])
+        evidence.append(first_party_fact[1])
     if not facts:
+        if claims:
+            return ClaimRows(tuple(claims), tuple(evidence), observation)
         excerpt = next((value[:8192] for value in (title, body, observation.raw or "") if value), None)
         if excerpt is None:
             raise ValueError("source item has no bounded evidence")
@@ -147,7 +289,7 @@ def claims_from_observation(observation: ObservationContract, *, extracted_at: s
                                          EvidenceRole.SUPPORTS, excerpt,
                                          hashlib.sha256(excerpt.encode()).hexdigest(),
                                          observation.independence_group, observation.observed_at))
-        return ClaimRows(tuple(claims), tuple(evidence))
+        return ClaimRows(tuple(claims), tuple(evidence), observation)
     for fact in facts:
         subject, predicate, value = _fact_fields(fact)
         claim_id = stable_id("claim", observation.observation_id, fact.kind.value,
@@ -159,25 +301,100 @@ def claims_from_observation(observation: ObservationContract, *, extracted_at: s
                                          EvidenceRole.SUPPORTS, fact.evidence,
                                          hashlib.sha256(fact.evidence.encode()).hexdigest(),
                                          observation.independence_group, observation.observed_at))
-    return ClaimRows(tuple(claims), tuple(evidence))
+    return ClaimRows(tuple(claims), tuple(evidence), observation)
 
 
 def persist_claim_rows(connection, rows: ClaimRows) -> int:
-    inserted = 0
-    for claim in rows.claims:
-        connection.execute("""INSERT OR IGNORE INTO claims
-            (claim_id,source_item_id,subject,predicate,object_value,statement_type,
-             extraction_confidence,status,extracted_at) VALUES (?,?,?,?,?,?,?,?,?)""", claim_row(claim, connection))
-        inserted += connection.execute("SELECT changes()").fetchone()[0]
+    return persist_claim_rows_counts(connection, rows)[0]
+
+
+def _persist_claim_evidence_provenance(connection, rows: ClaimRows) -> None:
+    if connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE version=11"
+    ).fetchone() is None:
+        return
+    from .provenance import normalize_publisher_host
+
+    context = rows.observation
+    claims = {claim.claim_id: claim for claim in rows.claims}
     for evidence in rows.evidence:
-        connection.execute("""INSERT OR IGNORE INTO claim_evidence
-            (evidence_id,claim_id,source_item_id,evidence_role,exact_excerpt,excerpt_hash,
-             independence_group,observed_at) VALUES (?,?,?,?,?,?,?,?)""", evidence_row(evidence, connection))
-    return inserted
+        claim = claims.get(evidence.claim_id)
+        if claim is None:
+            raise ValueError("claim evidence references a claim absent from its ClaimRows")
+        if context is not None and evidence.observation_id != context.observation_id:
+            raise ValueError("claim evidence provenance must match its source observation")
+        source_item_id = observation_id_to_source_item_id(connection, evidence.observation_id)
+        role = context.effective_source_role.value if context is not None else SourceRole.DISCOVERY.value
+        group = context.independence_group if context is not None else "unknown"
+        rule_id = context.matched_rule_id if context is not None else None
+        scopes = context.authority_scope if context is not None else ()
+        entities = context.authority_entities if context is not None else ()
+        category = context.category if context is not None else ""
+        host_value = (
+            context.publisher_host or context.canonical_url
+            if context is not None
+            else "unknown"
+        )
+        try:
+            host = normalize_publisher_host(host_value)
+        except ValueError:
+            host = "unknown"
+            role = SourceRole.DISCOVERY.value
+            group = "unknown"
+            rule_id = None
+            scopes = ()
+            entities = ()
+        authority_match = (
+            role == SourceRole.PRIMARY.value
+            and category in scopes
+            and authority_entity_matches(claim.subject, entities)
+        )
+        applied_at = (
+            context.classification_timestamp or context.observed_at
+            if context is not None
+            else evidence.observed_at
+        )
+        reason = (
+            context.classification_reason
+            if context is not None
+            else "missing_source_provenance"
+        )
+        values = (
+            evidence.evidence_id,
+            source_item_id,
+            host,
+            role,
+            group or "unknown",
+            rule_id,
+            json.dumps(scopes, ensure_ascii=False, separators=(",", ":")),
+            json.dumps(entities, ensure_ascii=False, separators=(",", ":")),
+            int(authority_match),
+            applied_at,
+            reason,
+        )
+        connection.execute(
+            """INSERT OR IGNORE INTO claim_evidence_provenance(
+                   evidence_id,source_item_id,normalized_publisher_host,
+                   effective_source_role,independence_group,matched_rule_id,
+                   authority_scope_json,authority_entities_json,authority_match,
+                   classification_timestamp,classification_reason)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            values,
+        )
+        persisted = connection.execute(
+            """SELECT evidence_id,source_item_id,normalized_publisher_host,
+                      effective_source_role,independence_group,matched_rule_id,
+                      authority_scope_json,authority_entities_json,authority_match,
+                      classification_timestamp,classification_reason
+                 FROM claim_evidence_provenance WHERE evidence_id=?""",
+            (evidence.evidence_id,),
+        ).fetchone()
+        if persisted != values:
+            raise ValueError("claim evidence provenance conflicts with its immutable persisted snapshot")
 
 
 def persist_claim_rows_counts(connection, rows: ClaimRows) -> tuple[int, int]:
-    """Persist rows and return actual claim/evidence INSERT OR IGNORE counts."""
+    """Persist claims, evidence, and their immutable claim-specific provenance snapshot."""
     claims_inserted = 0
     evidence_inserted = 0
     for claim in rows.claims:
@@ -190,6 +407,7 @@ def persist_claim_rows_counts(connection, rows: ClaimRows) -> tuple[int, int]:
             (evidence_id,claim_id,source_item_id,evidence_role,exact_excerpt,excerpt_hash,
              independence_group,observed_at) VALUES (?,?,?,?,?,?,?,?)""", evidence_row(evidence, connection))
         evidence_inserted += connection.execute("SELECT changes()").fetchone()[0]
+    _persist_claim_evidence_provenance(connection, rows)
     return claims_inserted, evidence_inserted
 
 

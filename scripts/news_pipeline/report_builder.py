@@ -21,7 +21,7 @@ from .policies import QueryPolicy
 from .report_artifacts import ArtifactMismatch, ArtifactRoot, ReportArtifacts, ArtifactResult, compute_artifacts, verify_artifacts
 from .report_artifacts import _paths as _artifact_paths
 from datetime import timedelta
-from .verification import verify_evidence
+from .verification import claim_specific_evidence_row, verify_evidence
 
 
 REPORT_EVENTS_PROMOTION_DISCREPANCY = (
@@ -441,12 +441,18 @@ def _has_schema_v7(con: sqlite3.Connection) -> bool:
     ).fetchone() is not None
 
 
+def _has_schema_v11(con: sqlite3.Connection) -> bool:
+    return con.execute(
+        "SELECT 1 FROM schema_migrations WHERE version=11"
+    ).fetchone() is not None
+
+
 def _has_verified_claims_and_provenance(
     con: sqlite3.Connection, event_id: str, version: int
 ) -> bool:
     """Require v7 event links to retain the verified promotion evidence."""
     rows = con.execute(
-        """SELECT ec.claim_id,c.status
+        """SELECT ec.claim_id,c.subject,c.status
              FROM event_claims ec
              JOIN claims c ON c.claim_id=ec.claim_id
             WHERE ec.event_id=? AND ec.event_version=?
@@ -457,10 +463,35 @@ def _has_verified_claims_and_provenance(
         return False
     if not _has_schema_v7(con):
         return True
-    if any(row[1] != VerificationState.VERIFIED.value for row in rows):
+    if any(row[2] != VerificationState.VERIFIED.value for row in rows):
         return False
     all_evidence: list[dict[str, object]] = []
-    for claim_id, _status in rows:
+    has_v11 = _has_schema_v11(con)
+    for claim_id, claim_subject, _status in rows:
+        if has_v11:
+            evidence_rows = con.execute(
+                """SELECT ce.evidence_role,cp.effective_source_role,
+                          cp.independence_group,cp.authority_match,cp.matched_rule_id,
+                          cp.normalized_publisher_host,cp.authority_scope_json,
+                          cp.authority_entities_json,si.category
+                     FROM claim_evidence ce
+                     LEFT JOIN claim_evidence_provenance cp ON cp.evidence_id=ce.evidence_id
+                     JOIN source_items si ON si.source_item_id=ce.source_item_id
+                    WHERE ce.claim_id=? ORDER BY ce.evidence_id""",
+                (claim_id,),
+            ).fetchall()
+            expected_count = con.execute(
+                "SELECT COUNT(*) FROM claim_evidence WHERE claim_id=?", (claim_id,)
+            ).fetchone()[0]
+            if not evidence_rows or len(evidence_rows) != expected_count:
+                return False
+            claim_evidence = tuple(
+                claim_specific_evidence_row(row, str(claim_subject))
+                for row in evidence_rows
+            )
+            if verify_evidence(claim_evidence) is not VerificationState.VERIFIED:
+                return False
+            continue
         evidence = con.execute(
             """SELECT ce.evidence_role,sp.effective_source_role,
                       sp.independence_group,sp.authority_match
@@ -487,6 +518,8 @@ def _has_verified_claims_and_provenance(
             }
             for row in evidence
         )
+    if has_v11:
+        return True
     return verify_evidence(tuple(all_evidence)) is VerificationState.VERIFIED
 
 

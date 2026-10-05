@@ -121,7 +121,9 @@ def candidate_from_source_item(row: Mapping[str, object], evaluated_at: str) -> 
     if published_at is not None and evidence_raw == "source":
         evidence = "source"
     elif published_at is not None and isinstance(evidence_raw, str) and (
-        evidence_raw == "metadata" or evidence_raw.startswith("metadata:")
+        evidence_raw == "metadata"
+        or evidence_raw.startswith("metadata:")
+        or evidence_raw.startswith("feed-metadata:")
     ):
         evidence = "metadata"
     elif raw_published in (None, "") and evidence_raw in (None, "", "missing"):

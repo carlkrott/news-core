@@ -20,10 +20,17 @@ from news_pipeline.ingest_runner import (
     _filter_reason,
     _open_writer,
     _sync_sources,
+    _verify_schema,
     run_ingest,
 )
 from news_pipeline.schema_v3 import migrate_v3
 from news_pipeline.schema_v4 import migrate_v4
+from news_pipeline.schema_v5 import migrate_v5
+from news_pipeline.delivery_schema_v6 import migrate_v6
+from news_pipeline.schema_v7 import migrate_v7
+from news_pipeline.schema_v8 import migrate_v8
+from news_pipeline.schema_v9 import migrate_v9
+from news_pipeline.schema_v10 import migrate_v10
 from news_pipeline.source_registry import load_registry
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -40,6 +47,16 @@ def create_v4_db(path: Path) -> None:
     try:
         migrate_v3(connection, "2026-01-01T00:00:01Z")
         migrate_v4(connection, "2026-01-01T00:00:02Z")
+    finally:
+        connection.close()
+
+
+def migrate_v4_to_v10(path: Path) -> None:
+    connection = sqlite3.connect(path, isolation_level=None)
+    connection.execute("PRAGMA foreign_keys=ON")
+    try:
+        for migration in (migrate_v5, migrate_v6, migrate_v7, migrate_v8, migrate_v9, migrate_v10):
+            migration(connection, "2026-01-01T00:00:03Z")
     finally:
         connection.close()
 
@@ -215,6 +232,7 @@ class RunnerCase(unittest.IsolatedAsyncioTestCase):
         *,
         run_at: str = RUN_AT,
         sources: Path | None = None,
+        provenance_path: Path | None = None,
         source_ids=None,
         max_queries=None,
         timing: FakeTiming | None = None,
@@ -226,6 +244,7 @@ class RunnerCase(unittest.IsolatedAsyncioTestCase):
             TOPICS,
             POLICY,
             run_at,
+            provenance_path=provenance_path,
             source_ids=source_ids,
             max_queries=max_queries,
             transport_factory=factory,
@@ -270,6 +289,21 @@ class SchemaAndLeaseTests(RunnerCase):
         with self.assertRaisesRegex(ValueError, "markers"):
             await run_ingest(self.db, self.sources, TOPICS, POLICY, RUN_AT)
         self.assertEqual(hashlib.sha256(self.db.read_bytes()).hexdigest(), before)
+
+    async def test_known_additive_schema_v10_is_admitted(self) -> None:
+        migrate_v4_to_v10(self.db)
+        _verify_schema(self.db)
+
+    async def test_schema_v10_does_not_allow_an_out_of_order_marker_prefix(self) -> None:
+        migrate_v4_to_v10(self.db)
+        connection = sqlite3.connect(self.db)
+        try:
+            connection.execute("DELETE FROM schema_migrations WHERE version=9")
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaisesRegex(ValueError, "known additive v4-v11 prefix"):
+            _verify_schema(self.db)
 
     async def test_config_sync_preserves_runtime_due_and_updates_hash(self) -> None:
         config = load_registry(self.sources, TOPICS, POLICY)
@@ -439,6 +473,67 @@ class PersistenceTests(RunnerCase):
         self.assertIn("https://feed.example.test/rss.xml", factory.calls["src1"][0].url)
         self.assertEqual(self.rows("SELECT retrieval_method FROM source_items")[0][0], "rss-poll")
 
+    async def test_first_ingest_registers_exact_overlay_rule_from_fresh_v10_empty_registry(self) -> None:
+        migrate_v4_to_v10(self.db)
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM publisher_registry")[0][0], 0)
+        provenance = self.root / "provenance.toml"
+        provenance.write_text(
+            """version = 1
+
+[[publishers]]
+rule_id = "approved-example-rule"
+host = "allowed.example.com"
+source_role = "primary"
+independence_group = "allowed-example-origin"
+categories = ["ai"]
+authority_entities = ["allowed.example.com"]
+enabled = true
+audit_note = "focused first-ingest regression fixture"
+""",
+            encoding="utf-8",
+        )
+
+        report = await self.run_with(
+            ScriptedFactory({"src1": [response(body=result_body(article()))]}),
+            provenance_path=provenance,
+        )
+        self.assertEqual(report.total_items_inserted, 1)
+        self.assertEqual(report.query_results[0].status, "success")
+        registered = self.rows(
+            """SELECT rule_id,normalized_host,effective_source_role,independence_group,
+                      category_scope_json,authority_entities_json,enabled,audit_note
+                 FROM publisher_registry"""
+        )
+        self.assertEqual(
+            registered,
+            [(
+                "approved-example-rule", "allowed.example.com", "primary",
+                "allowed-example-origin", '["ai"]', '["allowed.example.com"]',
+                1, "focused first-ingest regression fixture",
+            )],
+        )
+        provenance_row = self.rows(
+            """SELECT normalized_publisher_host,effective_source_role,independence_group,
+                      matched_rule_id,authority_match,classification_reason
+                 FROM source_item_provenance"""
+        )
+        self.assertEqual(
+            provenance_row,
+            [("allowed.example.com", "primary", "allowed-example-origin",
+              "approved-example-rule", 1, "matched_rule")],
+        )
+
+        self.make_due("src1")
+        replay = await self.run_with(
+            ScriptedFactory({"src1": [response(body=result_body(article()))]}),
+            run_at="2026-01-01T01:00:00Z",
+            provenance_path=provenance,
+        )
+        self.assertEqual(replay.total_items_inserted, 0)
+        self.assertEqual(replay.total_items_duplicate, 1)
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM publisher_registry")[0][0], 1)
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM source_item_provenance")[0][0], 1)
+
 
 class RetryAndFailureTests(RunnerCase):
     async def test_500_retries_then_succeeds_and_reports_retry(self) -> None:
@@ -455,14 +550,14 @@ class RetryAndFailureTests(RunnerCase):
     async def test_429_honors_retry_after_and_is_rate_limited_after_exhaustion(self) -> None:
         timing = FakeTiming()
         limited = response(status=429, headers=(("Retry-After", "10"), ("X-RateLimit-Reset", "1767226200")))
-        factory = ScriptedFactory({"src1": [limited, limited, limited]})
+        factory = ScriptedFactory({"src1": [limited, limited]})
         report = await self.run_with(factory, timing=timing)
         query = report.query_results[0]
-        self.assertEqual(len(factory.calls["src1"]), 3)
+        self.assertEqual(len(factory.calls["src1"]), 2)
         self.assertEqual(query.status, "rate_limited")
-        self.assertEqual(query.retries, 2)
+        self.assertEqual(query.retries, 1)
         self.assertEqual(query.retry_after_seconds, 10)
-        self.assertGreaterEqual(timing.sleeps.count(10.0), 2)
+        self.assertEqual(timing.sleeps.count(10.0), 1)
         persisted = self.rows(
             "SELECT status,error_count,rate_limit_reset_at FROM query_attempts"
         )[0]
@@ -473,22 +568,22 @@ class RetryAndFailureTests(RunnerCase):
         for status in (410, 500):
             with self.subTest(status=status):
                 if status == 500:
-                    scripted = [response(status=500)] * 3
+                    scripted = [response(status=500)] * 2
                 else:
                     scripted = [response(status=410)]
                 factory = ScriptedFactory({"src1": scripted})
                 report = await self.run_with(factory, run_at=f"2026-01-01T0{status % 10}:00:00Z")
                 self.assertEqual(report.query_results[0].status, "failed")
-                self.assertEqual(len(factory.calls["src1"]), 3 if status == 500 else 1)
+                self.assertEqual(len(factory.calls["src1"]), 2 if status == 500 else 1)
                 self.make_due("src1")
 
-    async def test_network_error_retries(self) -> None:
-        factory = ScriptedFactory(
-            {"src1": [NetworkError("offline"), response(body=result_body(article()))]}
-        )
+    async def test_network_error_is_not_retried(self) -> None:
+        factory = ScriptedFactory({"src1": [NetworkError("offline")]})
         report = await self.run_with(factory)
-        self.assertEqual(report.total_retries, 1)
-        self.assertEqual(report.total_items_inserted, 1)
+        self.assertEqual(len(factory.calls["src1"]), 1)
+        self.assertEqual(report.total_retries, 0)
+        self.assertEqual(report.query_results[0].status, "failed")
+        self.assertEqual(report.total_items_inserted, 0)
 
     async def test_mime_oversize_and_parse_failures_are_persisted_without_retry(self) -> None:
         cases = (
@@ -582,7 +677,7 @@ class LimitAndConcurrencyTests(RunnerCase):
     async def test_same_host_is_serial_and_starts_at_least_one_second_apart(self) -> None:
         self.sources = write_sources(
             self.root / "same-host.toml",
-            [source("src1", host="same.test"), source("src2", host="same.test", category="world")],
+            [source("src1", host="same.test"), source("src2", host="SAME.TEST.", category="world")],
         )
         timing = FakeTiming()
 

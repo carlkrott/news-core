@@ -15,7 +15,7 @@ from .event_contracts import FactDelta, FactKind, event_version_identity
 from .live_contracts import VerificationState, stable_id
 from .schema_v5 import _validate_v5
 from .schema_v7 import backfill_source_item_provenance, registry_from_connection
-from .verification import plan_corroboration_queries, verify_evidence
+from .verification import claim_specific_evidence_row, plan_corroboration_queries, verify_evidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +192,12 @@ def _has_schema_v7(connection: sqlite3.Connection) -> bool:
     ).fetchone() is not None
 
 
+def _has_schema_v11(connection: sqlite3.Connection) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE version=11"
+    ).fetchone() is not None
+
+
 def _v7_evidence_row(row: tuple, claim_subject: str) -> dict[str, object]:
     evidence_role, effective_role, group, authority_match, authority_entities = row
     if effective_role is None:
@@ -218,6 +224,46 @@ def _v7_evidence_row(row: tuple, claim_subject: str) -> dict[str, object]:
         "independence_group": group,
         "authority_match": authority,
     }
+
+
+def _v11_evidence_row(row: tuple, claim_subject: str) -> dict[str, object]:
+    return claim_specific_evidence_row(row, claim_subject)
+
+
+def _v11_claims_are_verified(
+    connection: sqlite3.Connection, claim_ids: tuple[str, ...]
+) -> bool:
+    if not claim_ids or len(set(claim_ids)) != len(claim_ids):
+        return False
+    placeholders = ",".join("?" for _ in claim_ids)
+    claim_rows = connection.execute(
+        f"SELECT claim_id,subject,status FROM claims WHERE claim_id IN ({placeholders})",
+        claim_ids,
+    ).fetchall()
+    if len(claim_rows) != len(claim_ids):
+        return False
+    for claim_id, subject, status in claim_rows:
+        if status != VerificationState.VERIFIED.value:
+            return False
+        rows = connection.execute(
+            """SELECT ce.evidence_role,cp.effective_source_role,cp.independence_group,
+                      cp.authority_match,cp.matched_rule_id,cp.normalized_publisher_host,
+                      cp.authority_scope_json,cp.authority_entities_json,si.category
+                 FROM claim_evidence ce
+                 JOIN source_items si ON si.source_item_id=ce.source_item_id
+                 LEFT JOIN claim_evidence_provenance cp ON cp.evidence_id=ce.evidence_id
+                WHERE ce.claim_id=? ORDER BY ce.evidence_id""",
+            (claim_id,),
+        ).fetchall()
+        expected = connection.execute(
+            "SELECT COUNT(*) FROM claim_evidence WHERE claim_id=?", (claim_id,)
+        ).fetchone()[0]
+        if not rows or len(rows) != expected:
+            return False
+        evidence = tuple(_v11_evidence_row(row, str(subject)) for row in rows)
+        if verify_evidence(evidence) is not VerificationState.VERIFIED:
+            return False
+    return True
 
 
 def _v7_claims_are_verified(
@@ -284,7 +330,12 @@ def _append_locked(connection: sqlite3.Connection, decisions: Iterable[EventWrit
         ) = _event_write_fields(item)
         if subject_suppressed:
             continue
-        if state == VerificationState.VERIFIED.value and _has_schema_v7(connection):
+        if state == VerificationState.VERIFIED.value and _has_schema_v11(connection):
+            if not _v11_claims_are_verified(connection, claim_ids):
+                raise ValueError(
+                    "verified event writes require claim-specific v11 provenance"
+                )
+        elif state == VerificationState.VERIFIED.value and _has_schema_v7(connection):
             if not _v7_claims_are_verified(connection, claim_ids):
                 raise ValueError(
                     "verified event writes require v7-verified claims and evidence"
@@ -368,6 +419,7 @@ def process_phase4(db_path: str | Path, evaluated_at: str, *, max_items: int = 1
     try:
         _require_v5(connection)
         has_v7 = _has_schema_v7(connection)
+        has_v11 = _has_schema_v11(connection)
         connection.execute("BEGIN IMMEDIATE")
         selected = _source_decisions(connection, max_items)
         if max_items == 0: selected = []
@@ -423,12 +475,27 @@ def process_phase4(db_path: str | Path, evaluated_at: str, *, max_items: int = 1
                     "normalized_publisher_host", "effective_source_role", "independence_group",
                     "matched_rule_id", "authority_match", "classification_reason",
                 )
-                source_row = connection.execute("""SELECT si.*,
-                    sp.normalized_publisher_host,sp.effective_source_role,sp.independence_group,
-                    sp.matched_rule_id,sp.authority_match,sp.classification_reason
-                    FROM source_items si
-                    LEFT JOIN source_item_provenance sp ON sp.source_item_id=si.source_item_id
-                    WHERE si.source_item_id=?""", (source_item_id,)).fetchone()
+                if has_v11:
+                    columns += (
+                        "authority_scope_json", "authority_entities_json",
+                        "classification_timestamp",
+                    )
+                    source_row = connection.execute("""SELECT si.*,
+                        sp.normalized_publisher_host,sp.effective_source_role,sp.independence_group,
+                        sp.matched_rule_id,sp.authority_match,sp.classification_reason,
+                        pr.category_scope_json,pr.authority_entities_json,
+                        sp.classification_timestamp
+                        FROM source_items si
+                        LEFT JOIN source_item_provenance sp ON sp.source_item_id=si.source_item_id
+                        LEFT JOIN publisher_registry pr ON pr.rule_id=sp.matched_rule_id
+                        WHERE si.source_item_id=?""", (source_item_id,)).fetchone()
+                else:
+                    source_row = connection.execute("""SELECT si.*,
+                        sp.normalized_publisher_host,sp.effective_source_role,sp.independence_group,
+                        sp.matched_rule_id,sp.authority_match,sp.classification_reason
+                        FROM source_items si
+                        LEFT JOIN source_item_provenance sp ON sp.source_item_id=si.source_item_id
+                        WHERE si.source_item_id=?""", (source_item_id,)).fetchone()
             else:
                 source_row = connection.execute("SELECT * FROM source_items WHERE source_item_id=?", (source_item_id,)).fetchone()
             source = dict(zip(columns, source_row))
@@ -444,7 +511,19 @@ def process_phase4(db_path: str | Path, evaluated_at: str, *, max_items: int = 1
                 equivalent = connection.execute("SELECT claim_id FROM claims WHERE subject=? AND predicate=? AND object_value=? ORDER BY claim_id", claim_key).fetchall()
                 ids = tuple(row[0] for row in equivalent)
                 equivalent_ids.update(ids)
-                if has_v7:
+                if has_v11:
+                    evidence_rows = connection.execute("""SELECT ce.evidence_role,
+                        cp.effective_source_role,cp.independence_group,cp.authority_match,
+                        cp.matched_rule_id,cp.normalized_publisher_host,
+                        cp.authority_scope_json,cp.authority_entities_json,si.category
+                        FROM claim_evidence ce
+                        LEFT JOIN claim_evidence_provenance cp ON cp.evidence_id=ce.evidence_id
+                        JOIN source_items si ON si.source_item_id=ce.source_item_id
+                        WHERE ce.claim_id IN (%s) ORDER BY ce.evidence_id""" % ",".join("?" for _ in ids), ids).fetchall()
+                    state = verify_evidence(
+                        tuple(_v11_evidence_row(row, str(claim_key[0])) for row in evidence_rows)
+                    )
+                elif has_v7:
                     evidence_rows = connection.execute("""SELECT ce.evidence_role,sp.effective_source_role,
                         sp.independence_group,sp.authority_match,pr.authority_entities_json
                         FROM claim_evidence ce

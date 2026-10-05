@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from .live_contracts import (
     CATEGORY_VALUES,
@@ -302,6 +303,37 @@ def _parse_sources(raw: Mapping[str, Any]) -> tuple[SourceContract, ...]:
         host = entry["host"]
         if type(host) is not str or "reddit.com" in host.casefold():
             raise ValueError("direct Reddit sources are disabled")
+        if adapter is SourceAdapter.RSS:
+            if len(queries) != 1:
+                raise ValueError("RSS source polls must contain exactly one feed request")
+            feed_url = urlsplit(queries[0].text)
+            configured_host = urlsplit(f"//{host}").hostname
+            try:
+                feed_host = feed_url.hostname
+                _ = feed_url.port
+            except ValueError as exc:
+                raise ValueError(f"sources[{index}] RSS query must be a valid feed URL") from exc
+            if (
+                feed_url.scheme not in {"http", "https"}
+                or not feed_host
+                or feed_url.username is not None
+                or feed_url.password is not None
+                or configured_host is None
+                or feed_host.casefold().rstrip(".") != configured_host.casefold().rstrip(".")
+            ):
+                raise ValueError(
+                    f"sources[{index}] RSS query must be an HTTP(S) URL on its configured host"
+                )
+        elif adapter is SourceAdapter.GITHUB:
+            if (
+                host != "api.github.com"
+                or len(queries) != 1
+                or queries[0].text != "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+                or category_scope != ("our_setup",)
+            ):
+                raise ValueError(
+                    f"sources[{index}] GitHub adapter is limited to the official llama.cpp latest-release API in our_setup"
+                )
         result.append(SourceContract(
             source_id=entry["source_id"], adapter_type=adapter, source_role=role, host=host,
             category_scope=category_scope,

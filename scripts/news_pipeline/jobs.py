@@ -82,6 +82,9 @@ def _parser() -> argparse.ArgumentParser:
     migrate_v10 = sub.add_parser("migrate-v10")
     _add_common_db(migrate_v10)
     migrate_v10.add_argument("--applied-at", required=True)
+    migrate_v11 = sub.add_parser("migrate-v11")
+    _add_common_db(migrate_v11)
+    migrate_v11.add_argument("--applied-at", required=True)
     return parser
 
 
@@ -466,6 +469,35 @@ def _run_migrate_v10(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_migrate_v11(args: argparse.Namespace) -> int:
+    connection: sqlite3.Connection | None = None
+    try:
+        if not Path(args.db).is_file():
+            raise ValueError("--db must be a file")
+        applied_at = _parse_utc(args.applied_at, name="--applied-at")
+        from .schema_v11 import migrate_v11
+
+        connection = sqlite3.connect(args.db, isolation_level=None, timeout=5.0)
+        applied = migrate_v11(
+            connection,
+            applied_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        )
+    except Exception as exc:
+        _json({"error": {"type": "runtime", "message": str(exc)}})
+        return 1
+    finally:
+        if connection is not None:
+            connection.close()
+    _json({
+        "job": "migrate-v11",
+        "state": "completed",
+        "schema_version": 11,
+        "applied": applied,
+        "network_used": False,
+    })
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.job == "tick":
@@ -480,6 +512,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_daily_deliver(args)
     if args.job == "migrate-v10":
         return _run_migrate_v10(args)
+    if args.job == "migrate-v11":
+        return _run_migrate_v11(args)
     if args.job == "health":
         from .news_health import health_snapshot
         _json(health_snapshot(args.db))

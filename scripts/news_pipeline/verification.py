@@ -40,6 +40,23 @@ def _constant(value):
 
 
 _INJECTION = re.compile(r"(?:ignore\s+(?:all\s+)?previous|system\s+prompt|developer\s+message|reveal\s+(?:the\s+)?prompt|call\s+(?:a\s+)?tool)", re.I)
+_NUMERIC_AUTHORITY_SUBJECT = re.compile(
+    r"^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?%?$"
+)
+
+
+def lead_retrieval_reason(retrieval_method: object) -> str | None:
+    """Return a fail-closed reason when retrieval supplies only a discovery lead."""
+    if type(retrieval_method) is not str:
+        return None
+    method = retrieval_method.strip().casefold()
+    if method in {"rss", "rss-poll"}:
+        return "feed_transport_not_claim_evidence"
+    if method in {"searxng", "searxng-query", "search"} or method.startswith("search-"):
+        return "search_result_not_claim_evidence"
+    if method == "social" or method.startswith("social-"):
+        return "social_lead_not_claim_evidence"
+    return None
 
 
 def _grounded_span(value: str, corpus: str) -> bool:
@@ -106,6 +123,21 @@ def _value(value: object) -> str:
     return ""
 
 
+def authority_entity_matches(subject: object, entities: object) -> bool:
+    """Match only an exact named claim subject, never a numeric article detail."""
+    if type(subject) is not str or not subject.strip() or not isinstance(entities, (list, tuple)):
+        return False
+    normalized = subject.strip()
+    if _NUMERIC_AUTHORITY_SUBJECT.fullmatch(normalized):
+        return False
+    return any(
+        type(entity) is str
+        and bool(entity.strip())
+        and normalized.casefold() == entity.strip().casefold()
+        for entity in entities
+    )
+
+
 def verify_evidence(evidence: Iterable[Mapping[str, object]]) -> VerificationState:
     rows = tuple(evidence)
     supports = []
@@ -146,6 +178,68 @@ def verify_evidence(evidence: Iterable[Mapping[str, object]]) -> VerificationSta
     if len(groups) >= 2 and roles & {"neutral", "specialist"}:
         return VerificationState.VERIFIED
     return VerificationState.UNVERIFIED
+
+
+def claim_specific_evidence_row(
+    row: tuple[object, ...], claim_subject: str
+) -> dict[str, object]:
+    """Adapt one schema-v11 provenance snapshot without trusting broad joins."""
+    if len(row) != 9 or type(claim_subject) is not str or not claim_subject.strip():
+        return {
+            "role": row[0] if row else "",
+            "effective_source_role": "",
+            "independence_group": "",
+            "authority_match": None,
+        }
+    (
+        evidence_role,
+        effective_role,
+        group,
+        stored_authority_match,
+        rule_id,
+        publisher_host,
+        authority_scope_json,
+        authority_entities_json,
+        category,
+    ) = row
+    try:
+        scopes = json.loads(authority_scope_json) if isinstance(authority_scope_json, str) else None
+        entities = json.loads(authority_entities_json) if isinstance(authority_entities_json, str) else None
+    except json.JSONDecodeError:
+        scopes, entities = None, None
+    identity_valid = (
+        effective_role in {"primary", "neutral", "specialist"}
+        and isinstance(group, str)
+        and bool(group.strip())
+        and group.strip() != "unknown"
+        and isinstance(rule_id, str)
+        and bool(rule_id.strip())
+        and isinstance(publisher_host, str)
+        and bool(publisher_host.strip())
+        and publisher_host.strip() != "unknown"
+        and type(scopes) is list
+        and all(type(value) is str and bool(value.strip()) for value in scopes)
+        and category in scopes
+        and type(entities) is list
+        and all(type(value) is str and bool(value.strip()) for value in entities)
+    )
+    entity_values = entities if type(entities) is list else []
+    calculated_authority_match = (
+        identity_valid
+        and effective_role == "primary"
+        and authority_entity_matches(claim_subject, entity_values)
+    )
+    authority_match = (
+        type(stored_authority_match) in (int, bool)
+        and bool(stored_authority_match)
+        and calculated_authority_match
+    )
+    return {
+        "role": evidence_role,
+        "effective_source_role": effective_role if identity_valid else "",
+        "independence_group": group.strip() if identity_valid else "",
+        "authority_match": authority_match,
+    }
 
 
 def exact_excerpt_hash(excerpt: str) -> str:

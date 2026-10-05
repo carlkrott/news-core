@@ -34,6 +34,7 @@ from .base import (
     parse_rate_limit_remaining,
 )
 from .rss import RssAdapter
+from .github import GitHubReleaseAdapter
 from .searxng import SearxngAdapter
 
 __all__ = [
@@ -55,4 +56,5 @@ __all__ = [
     "Transport",
     "SearxngAdapter",
     "RssAdapter",
+    "GitHubReleaseAdapter",
 ]
