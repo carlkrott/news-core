@@ -314,6 +314,8 @@ class SourceContract:
         _boolean("enabled", self.enabled)
         if type(self.queries) is not tuple or not self.queries or any(type(query) is not QuerySeed for query in self.queries):
             raise ValueError("queries must be a non-empty tuple of QuerySeed values")
+        if self.adapter_type is SourceAdapter.RSS and len(self.queries) != 1:
+            raise ValueError("RSS source polls must contain exactly one feed request")
         if len(self.category_scope) == 1:
             pipeline_category = self.category_scope[0]
             normalized_queries = tuple(
@@ -388,6 +390,9 @@ class ObservationContract:
     matched_rule_id: str | None = None
     authority_match: bool = False
     classification_reason: str = "unknown_publisher"
+    authority_scope: tuple[str, ...] = ()
+    authority_entities: tuple[str, ...] = ()
+    classification_timestamp: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("observation_id", "source_id", "original_url", "canonical_url", "publisher", "retrieval_method"):
@@ -403,6 +408,9 @@ class ObservationContract:
         if type(self.authority_match) is not bool:
             raise ValueError("authority_match must be a boolean")
         _text("classification_reason", self.classification_reason)
+        _strings("authority_scope", self.authority_scope)
+        _strings("authority_entities", self.authority_entities)
+        _timestamp("classification_timestamp", self.classification_timestamp, optional=True)
         for name in ("published_at", "updated_at", "announced_at", "occurred_at", "scheduled_for"):
             _timestamp(name, getattr(self, name), optional=True)
         if self.published_at is None and self.publication_evidence is not None:

@@ -165,6 +165,9 @@ FORBIDDEN_BASENAMES: frozenset[str] = frozenset(
         "secret",
         "secret.json",
         "secret.toml",
+        # Lockfile and editable-install metadata are development-only.
+        "uv.lock",
+        "_debug_db.py",
     }
 )
 
@@ -186,6 +189,7 @@ FORBIDDEN_PATH_FRAGMENTS: tuple[str, ...] = (
     "build",
     "dist",
     ".git",
+    "news_core.egg-info",
 )
 
 # File suffixes that are runtime, cache, bytecode, or evidence artifacts.
@@ -332,7 +336,10 @@ CONTENT_SPAN_ALLOWANCES: dict[str, dict[str, tuple[tuple[int, int], ...]]] = {
     },
     "tests/news_pipeline/test_process_runner.py": {
         "PRIVATE_IP_LITERAL": _line_spans(47, 74, 352),
-        "NON_PLACEHOLDER_HOST": _line_spans(47, 74, 352),
+        "NON_PLACEHOLDER_HOST": _line_spans(47, 74, 371),
+    },
+    "tests/news_pipeline/test_github_adapter.py": {
+        "NON_PLACEHOLDER_HOST": _line_spans(120),
     },
     "tests/news_pipeline/test_query_planner.py": {
         "PRIVATE_IP_LITERAL": _line_spans(92, 102),

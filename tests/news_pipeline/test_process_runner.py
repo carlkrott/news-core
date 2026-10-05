@@ -265,6 +265,14 @@ class ProcessRunnerTests(unittest.TestCase):
             },
             EVALUATED_AT,
         )
+        feed_metadata = candidate_from_source_item(
+            base
+            | {
+                "published_at": "2026-09-06T11:00:00Z",
+                "publication_evidence": "feed-metadata:Sun, 06 Sep 2026 11:00:00 +0000",
+            },
+            EVALUATED_AT,
+        )
         missing = candidate_from_source_item(
             base | {"published_at": None, "publication_evidence": None}, EVALUATED_AT
         )
@@ -276,10 +284,21 @@ class ProcessRunnerTests(unittest.TestCase):
             },
             EVALUATED_AT,
         )
+        unknown = candidate_from_source_item(
+            base
+            | {
+                "published_at": "2026-09-06T11:00:00Z",
+                "publication_evidence": "unknown:raw",
+            },
+            EVALUATED_AT,
+        )
         self.assertEqual(metadata.published_evidence, "metadata")
+        self.assertEqual(feed_metadata.published_evidence, "metadata")
+        self.assertEqual(feed_metadata.published_at, "2026-09-06T11:00:00Z")
         self.assertEqual(missing.published_evidence, "missing")
         self.assertEqual(invalid.published_evidence, "unparseable")
         self.assertIsNone(invalid.published_at)
+        self.assertEqual(unknown.published_evidence, "unparseable")
 
     def test_exact_and_syndicated_urls_are_suppressed(self) -> None:
         def seed(connection: sqlite3.Connection) -> None:

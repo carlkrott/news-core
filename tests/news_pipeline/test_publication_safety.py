@@ -17,7 +17,7 @@ import sys
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+ROOT = Path(os.environ.get("PUBLICATION_SAFETY_ROOT", Path(__file__).resolve().parent.parent.parent))
 SCRIPTS_DIR = ROOT / "scripts"
 CHECKER = SCRIPTS_DIR / "check_publication_safety.py"
 

@@ -145,6 +145,53 @@ def _insert_rules(connection: sqlite3.Connection, rules: Sequence[PublisherRule]
         )
 
 
+def _ensure_matched_rule_registered(
+    connection: sqlite3.Connection,
+    rule: PublisherRule,
+    *,
+    publisher_host: str,
+    category: str,
+    classified_role: str,
+    independence_group: str,
+    classified_at: str,
+) -> None:
+    """Persist only the approved rule that classified this item, with exact readback."""
+    host_matches = publisher_host == rule.host or publisher_host.endswith(f".{rule.host}")
+    if (
+        not rule.enabled
+        or category not in rule.categories
+        or not host_matches
+        or classified_role != rule.source_role.value
+        or independence_group != rule.independence_group
+    ):
+        raise ValueError("matched publisher rule does not match the classified identity or scope")
+
+    expected = (
+        rule.host,
+        rule.source_role.value,
+        rule.independence_group,
+        json.dumps(rule.categories, ensure_ascii=False, separators=(",", ":")),
+        json.dumps(rule.authority_entities, ensure_ascii=False, separators=(",", ":")),
+        int(rule.enabled),
+        rule.audit_note,
+    )
+    connection.execute(
+        """INSERT OR IGNORE INTO publisher_registry(
+               rule_id,normalized_host,effective_source_role,independence_group,
+               category_scope_json,authority_entities_json,enabled,audit_note,created_at)
+           VALUES(?,?,?,?,?,?,?,?,?)""",
+        (rule.rule_id, *expected, classified_at),
+    )
+    stored = connection.execute(
+        """SELECT normalized_host,effective_source_role,independence_group,
+                  category_scope_json,authority_entities_json,enabled,audit_note
+             FROM publisher_registry WHERE rule_id=?""",
+        (rule.rule_id,),
+    ).fetchone()
+    if stored != expected:
+        raise ValueError("publisher registry rule conflicts with the approved identity or scope")
+
+
 def backfill_source_item_provenance(
     connection: sqlite3.Connection,
     registry: PublisherRegistry,
@@ -152,7 +199,7 @@ def backfill_source_item_provenance(
     *,
     source_item_ids: Iterable[str] | None = None,
 ) -> int:
-    """Classify source items using reviewed rules; unknown items stay discovery."""
+    """Classify source items using reviewed rules; persist matched rules only."""
     _validate_timestamp(classified_at)
     _validate_v7(connection)
     requested = None if source_item_ids is None else tuple(source_item_ids)
@@ -182,6 +229,22 @@ def backfill_source_item_provenance(
             classified_at=classified_at,
             claim_subject=publisher,
         )
+        if result.matched_rule_id is not None:
+            matched_rule = next(
+                (rule for rule in registry.rules if rule.rule_id == result.matched_rule_id),
+                None,
+            )
+            if matched_rule is None:
+                raise ValueError("classifier returned a rule outside the approved provenance registry")
+            _ensure_matched_rule_registered(
+                connection,
+                matched_rule,
+                publisher_host=result.normalized_publisher_host,
+                category=category,
+                classified_role=result.effective_source_role.value,
+                independence_group=result.independence_group,
+                classified_at=classified_at,
+            )
         connection.execute(
             """INSERT INTO source_item_provenance(
                    source_item_id,normalized_publisher_host,effective_source_role,

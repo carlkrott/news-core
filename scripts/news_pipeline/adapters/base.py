@@ -233,8 +233,13 @@ async def _default_transport(request: FetchRequest, *, retrieved_at: str) -> Fet
         req = urllib.request.Request(
             request.url, headers=headers_dict, method="GET"
         )
+        class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        opener = urllib.request.build_opener(NoRedirectHandler)
         try:
-            response = urllib.request.urlopen(
+            response = opener.open(
                 req, timeout=int(request.timeout_seconds)
             )
         except urllib.error.HTTPError as exc:
@@ -463,6 +468,9 @@ class Adapter(ABC):
             validators = FetchValidators()
         if max_response_bytes is None:
             max_response_bytes = self.MAX_RESPONSE_BYTES
+        if type(max_response_bytes) is not int or max_response_bytes < 1:
+            raise ValueError("max_response_bytes must be a positive integer")
+        max_response_bytes = min(max_response_bytes, self.MAX_RESPONSE_BYTES)
         if timeout_seconds is None:
             timeout_seconds = self.REQUEST_TIMEOUT_SECONDS
 
@@ -510,6 +518,8 @@ class Adapter(ABC):
                     etag=_header(response.headers, "etag"),
                     last_modified=_header(response.headers, "last-modified"),
                 ),
+                rate_limit_remaining=parse_rate_limit_remaining(response.headers),
+                rate_limit_reset=parse_rate_limit_reset(response.headers),
             )
 
         # HTTP error classification (before content-type check)
@@ -591,7 +601,7 @@ class Adapter(ABC):
             last_modified=_header(response.headers, "last-modified"),
         )
 
-        if status in (408, 425, 429, 500, 502, 503, 504):
+        if status == 429 or 500 <= status < 600:
             return FetchResult(
                 http_status=status,
                 error=RetryableHttpError(
@@ -615,6 +625,9 @@ class Adapter(ABC):
                 ),
                 retryable=False,
                 validators=validators,
+                retry_after=retry_after,
+                rate_limit_remaining=parse_rate_limit_remaining(response.headers),
+                rate_limit_reset=parse_rate_limit_reset(response.headers),
             )
 
     def _content_type_acceptable(self, content_type: str) -> bool:
