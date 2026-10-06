@@ -31,6 +31,63 @@ class ClaimPipelineTests(unittest.TestCase):
         for evidence in first.evidence:
             self.assertEqual(evidence.excerpt_hash, hashlib.sha256(evidence.exact_excerpt.encode()).hexdigest())
 
+    def test_official_llamacpp_release_uses_only_policy_bound_tag_version(self):
+        observation = replace(
+            self.observation(),
+            source_id="github-llamacpp-release",
+            category="our_setup",
+            original_url="https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
+            canonical_url="https://github.com/ggml-org/llama.cpp/releases/tag/v0.6.0",
+            publisher="llama.cpp",
+            retrieval_method="github-release-api",
+            observed_at="2026-10-06T07:02:00Z",
+            published_at="2026-10-05T16:56:22Z",
+            title="v0.6.0",
+            body="Release notes include dependency versions v0.26.0 and v0.5.0.",
+            publisher_host="github.com",
+            effective_source_role=SourceRole.PRIMARY,
+            independence_group="ggml-org-llama.cpp-origin",
+            matched_rule_id="llama-cpp-own-release",
+            authority_match=True,
+            classification_reason="matched_rule",
+            authority_scope=("our_setup",),
+            authority_entities=("llama.cpp",),
+        )
+
+        rows = claims_from_observation(observation)
+
+        self.assertEqual(len(rows.claims), 1)
+        self.assertEqual(rows.claims[0].subject, "llama.cpp")
+        self.assertEqual(rows.claims[0].predicate, "has_version")
+        self.assertEqual(rows.claims[0].object_value, "0.6.0")
+        self.assertEqual(rows.evidence[0].exact_excerpt, "v0.6.0")
+
+    def test_llamacpp_release_tag_context_never_overrides_failed_source_authority(self):
+        observation = replace(
+            self.observation(),
+            source_id="github-llamacpp-release",
+            category="our_setup",
+            original_url="https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
+            canonical_url="https://github.com/ggml-org/llama.cpp/releases/tag/v0.6.0",
+            publisher="llama.cpp",
+            retrieval_method="github-release-api",
+            title="v0.6.0",
+            body="Release notes include dependency version v0.26.0.",
+            publisher_host="github.com",
+            effective_source_role=SourceRole.PRIMARY,
+            independence_group="ggml-org-llama.cpp-origin",
+            matched_rule_id="llama-cpp-own-release",
+            authority_match=False,
+            classification_reason="authority_not_matched",
+            authority_scope=("our_setup",),
+            authority_entities=("llama.cpp",),
+        )
+
+        rows = claims_from_observation(observation)
+
+        self.assertTrue(rows.claims)
+        self.assertFalse(any(claim.subject == "llama.cpp" for claim in rows.claims))
+
     def test_first_party_mkinitcpio_state_fact_uses_exact_named_authority(self):
         observation = ObservationContract(
             observation_id="arch-capture-1",
