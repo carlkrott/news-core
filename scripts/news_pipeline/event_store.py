@@ -8,8 +8,10 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Iterable, Mapping, cast
+from urllib.parse import quote, urlsplit
 
 from .claim_pipeline import claims_from_observation, observation_from_source_item, persist_claim_rows_counts
+from .adapters.base import normalize_timestamp
 from .adjudication import _family_hits, _has_positive
 from .event_contracts import FactDelta, FactKind, event_version_identity
 from .live_contracts import VerificationState, stable_id
@@ -250,6 +252,85 @@ def _claim_verification_state(
     return verify_evidence(evidence)
 
 
+_RELEASE_PAGE_PREFIX = "/ggml-org/llama.cpp/releases/tag/"
+
+
+def _first_party_release_date_is_trusted(
+    connection: sqlite3.Connection, source_item_id: str
+) -> bool:
+    """Accept the persisted release-API ``published_at`` as bounded date evidence.
+
+    Only the policy-bound llama.cpp release item qualifies, and only when the
+    adapter identity, canonical release URL, raw API timestamp, stored
+    ``metadata:<raw>`` evidence and enabled exact-authority provenance agree.
+    Arbitrary ``metadata:`` evidence from other sources is never accepted.
+    """
+    row = connection.execute(
+        """SELECT si.source_id,si.category,si.publisher,si.retrieval_method,
+                  si.canonical_url,si.original_url,si.published_at,
+                  si.publication_evidence,si.raw,
+                  sp.normalized_publisher_host,sp.effective_source_role,
+                  sp.independence_group,sp.matched_rule_id,sp.authority_match,
+                  sp.classification_reason,
+                  pr.normalized_host,pr.effective_source_role,pr.independence_group,
+                  pr.category_scope_json,pr.authority_entities_json,pr.enabled
+             FROM source_items si
+             JOIN source_item_provenance sp ON sp.source_item_id=si.source_item_id
+             JOIN publisher_registry pr ON pr.rule_id=sp.matched_rule_id
+            WHERE si.source_item_id=?""",
+        (source_item_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    (source_id, category, publisher, method, canonical, original, published_at,
+     evidence, raw, host, role, group, rule_id, authority_match, reason,
+     rule_host, rule_role, rule_group, scope_json, entities_json, enabled) = row
+    if (
+        source_id != "github-llamacpp-release"
+        or category != "our_setup"
+        or publisher != "llama.cpp"
+        or method != "github-release-api"
+        or original != canonical
+        or host != "github.com"
+        or role != "primary"
+        or group != "ggml-org-llama.cpp-origin"
+        or rule_id != "llama-cpp-own-release"
+        or authority_match != 1
+        or reason != "matched_rule"
+        or rule_host != "github.com"
+        or rule_role != "primary"
+        or rule_group != "ggml-org-llama.cpp-origin"
+        or enabled != 1
+    ):
+        return False
+    try:
+        if json.loads(scope_json) != ["our_setup"] or json.loads(entities_json) != ["llama.cpp"]:
+            return False
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return False
+    if type(payload) is not dict:
+        return False
+    raw_published = payload.get("published_at")
+    tag = payload.get("tag_name")
+    if (
+        type(raw_published) is not str
+        or type(tag) is not str
+        or not tag
+        or evidence != f"metadata:{raw_published}"
+        or normalize_timestamp(raw_published) != published_at
+        or payload.get("html_url") != canonical
+    ):
+        return False
+    parsed = urlsplit(canonical)
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname == "github.com"
+        and not (parsed.query or parsed.fragment or parsed.username or parsed.password)
+        and parsed.path == _RELEASE_PAGE_PREFIX + quote(tag, safe="")
+    )
+
+
 def _source_item_is_fresh(
     connection: sqlite3.Connection, source_item_id: str, evaluated_at: str
 ) -> bool:
@@ -258,7 +339,11 @@ def _source_item_is_fresh(
              FROM source_items WHERE source_item_id=?""",
         (source_item_id,),
     ).fetchone()
-    if row is None or not row[3] or row[2] != "source" or not row[1]:
+    if row is None or not row[3] or not row[1]:
+        return False
+    if row[2] != "source" and not _first_party_release_date_is_trusted(
+        connection, source_item_id
+    ):
         return False
     try:
         category = Category(row[0])
