@@ -8,6 +8,7 @@ import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Iterable, Mapping
+from urllib.parse import unquote, urlsplit
 
 from .event_contracts import FactKind, TypedFact
 from .fact_extraction import extract_facts
@@ -269,6 +270,9 @@ def claims_from_observation(observation: ObservationContract, *, extracted_at: s
         if first_party_fact is None
         or not _is_leading_publication_date(fact, observation, first_party_fact[2])
     )
+    release_tag_fact = _trusted_llamacpp_release_tag_fact(observation, facts)
+    if release_tag_fact is not None:
+        facts = (release_tag_fact[1],)
     claims: list[ClaimContract] = []
     evidence: list[EvidenceContract] = []
     if first_party_fact is not None:
@@ -292,6 +296,8 @@ def claims_from_observation(observation: ObservationContract, *, extracted_at: s
         return ClaimRows(tuple(claims), tuple(evidence), observation)
     for fact in facts:
         subject, predicate, value = _fact_fields(fact)
+        if release_tag_fact is not None:
+            subject = release_tag_fact[0]
         claim_id = stable_id("claim", observation.observation_id, fact.kind.value,
                              fact.unit, value, fact.evidence)
         evidence_id = stable_id("evidence", claim_id, observation.observation_id, fact.evidence)
@@ -302,6 +308,53 @@ def claims_from_observation(observation: ObservationContract, *, extracted_at: s
                                          hashlib.sha256(fact.evidence.encode()).hexdigest(),
                                          observation.independence_group, observation.observed_at))
     return ClaimRows(tuple(claims), tuple(evidence), observation)
+
+
+def _trusted_llamacpp_release_tag_fact(
+    observation: ObservationContract, facts: tuple[TypedFact, ...]
+) -> tuple[str, TypedFact] | None:
+    """Keep only the exact tag claim for the policy-bound first-party release API."""
+    if (
+        observation.source_id != "github-llamacpp-release"
+        or observation.category != "our_setup"
+        or observation.publisher != "llama.cpp"
+        or observation.publisher_host != "github.com"
+        or observation.effective_source_role is not SourceRole.PRIMARY
+        or not observation.authority_match
+        or observation.matched_rule_id != "llama-cpp-own-release"
+        or observation.classification_reason != "matched_rule"
+        or observation.authority_scope != ("our_setup",)
+        or observation.authority_entities != ("llama.cpp",)
+        or observation.independence_group != "ggml-org-llama.cpp-origin"
+    ):
+        return None
+    parsed = urlsplit(observation.canonical_url)
+    prefix = "/ggml-org/llama.cpp/releases/tag/"
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "github.com"
+        or parsed.port is not None
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.startswith(prefix)
+    ):
+        return None
+    tag = unquote(parsed.path[len(prefix):])
+    version = tag[1:] if tag.startswith("v") else tag
+    components = version.split(".")
+    if len(components) not in (2, 3) or any(not part.isdigit() for part in components):
+        return None
+    title = observation.title or ""
+    matches = [
+        fact for fact in facts
+        if fact.kind is FactKind.VERSION
+        and fact.value_normalized == version
+        and fact.evidence in title
+    ]
+    distinct = {(fact.value_normalized, fact.evidence) for fact in matches}
+    if len(distinct) != 1:
+        return None
+    return "llama.cpp", matches[0]
 
 
 def persist_claim_rows(connection, rows: ClaimRows) -> int:
