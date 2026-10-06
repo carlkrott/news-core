@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Iterable, Mapping, cast
@@ -13,8 +13,10 @@ from .claim_pipeline import claims_from_observation, observation_from_source_ite
 from .adjudication import _family_hits, _has_positive
 from .event_contracts import FactDelta, FactKind, event_version_identity
 from .live_contracts import VerificationState, stable_id
+from .policies import Category, default_query_policies
 from .schema_v5 import _validate_v5
 from .schema_v7 import backfill_source_item_provenance, registry_from_connection
+from .schema_v11 import validate_v11
 from .verification import claim_specific_evidence_row, plan_corroboration_queries, verify_evidence
 
 
@@ -53,6 +55,14 @@ class Phase4Report:
     def processed_count(self): return self.processed
     @property
     def event_versions_inserted(self): return self.versions_appended
+
+
+@dataclass(frozen=True, slots=True)
+class ReverificationReport:
+    source_item_id: str
+    claims_selected: int = 0
+    claims_verified: int = 0
+    versions_appended: int = 0
 
 
 def event_version_key(subject_id: str, event_id: str, event_version: int) -> str:
@@ -196,6 +206,194 @@ def _has_schema_v11(connection: sqlite3.Connection) -> bool:
     return connection.execute(
         "SELECT 1 FROM schema_migrations WHERE version=11"
     ).fetchone() is not None
+
+
+def _claim_verification_state(
+    connection: sqlite3.Connection, claim_id: str, subject: str
+) -> VerificationState:
+    """Re-evaluate one persisted claim against complete, claim-bound evidence."""
+    if _has_schema_v11(connection):
+        rows = connection.execute(
+            """SELECT ce.evidence_role,cp.effective_source_role,cp.independence_group,
+                      cp.authority_match,cp.matched_rule_id,cp.normalized_publisher_host,
+                      cp.authority_scope_json,cp.authority_entities_json,si.category
+                 FROM claim_evidence ce
+                 JOIN source_items si ON si.source_item_id=ce.source_item_id
+                 LEFT JOIN claim_evidence_provenance cp ON cp.evidence_id=ce.evidence_id
+                WHERE ce.claim_id=? ORDER BY ce.evidence_id""",
+            (claim_id,),
+        ).fetchall()
+        expected = connection.execute(
+            "SELECT COUNT(*) FROM claim_evidence WHERE claim_id=?", (claim_id,)
+        ).fetchone()[0]
+        if not rows or len(rows) != expected:
+            return VerificationState.UNVERIFIED
+        evidence = tuple(claim_specific_evidence_row(row, subject) for row in rows)
+    elif _has_schema_v7(connection):
+        rows = connection.execute(
+            """SELECT ce.evidence_role,sp.effective_source_role,sp.independence_group,
+                      sp.authority_match,pr.authority_entities_json
+                 FROM claim_evidence ce
+                 LEFT JOIN source_item_provenance sp ON sp.source_item_id=ce.source_item_id
+                 LEFT JOIN publisher_registry pr ON pr.rule_id=sp.matched_rule_id
+                WHERE ce.claim_id=? ORDER BY ce.evidence_id""",
+            (claim_id,),
+        ).fetchall()
+        expected = connection.execute(
+            "SELECT COUNT(*) FROM claim_evidence WHERE claim_id=?", (claim_id,)
+        ).fetchone()[0]
+        if not rows or len(rows) != expected:
+            return VerificationState.UNVERIFIED
+        evidence = tuple(_v7_evidence_row(row, subject) for row in rows)
+    else:
+        raise ValueError("bounded re-verification requires schema v7 publisher provenance")
+    return verify_evidence(evidence)
+
+
+def _source_item_is_fresh(
+    connection: sqlite3.Connection, source_item_id: str, evaluated_at: str
+) -> bool:
+    row = connection.execute(
+        """SELECT category,published_at,publication_evidence,canonical_url
+             FROM source_items WHERE source_item_id=?""",
+        (source_item_id,),
+    ).fetchone()
+    if row is None or not row[3] or row[2] != "source" or not row[1]:
+        return False
+    try:
+        category = Category(row[0])
+        published = datetime.fromisoformat(row[1].replace("Z", "+00:00"))
+        evaluated = datetime.fromisoformat(evaluated_at[:-1] + "+00:00")
+    except (TypeError, ValueError):
+        return False
+    if published.utcoffset() is None or evaluated.utcoffset() is None:
+        return False
+    age = evaluated - published
+    policy = default_query_policies().get(category)
+    return bool(policy and timedelta(0) <= age <= policy.recency)
+
+
+def reverify_source_item_claims(
+    db_path: str | Path,
+    source_item_id: str,
+    evaluated_at: str,
+    *,
+    max_claims: int = 100,
+) -> ReverificationReport:
+    """Re-verify only pending claims for one fresh, exact source-item identity.
+
+    This path does not ingest or manufacture claims/provenance. It uses the
+    existing v7/v11 authority rules, updates pending claims only when their
+    complete evidence verifies, and appends a timestamped event version only
+    when a linked event moves from unverified to verified.
+    """
+    _timestamp(evaluated_at, "evaluated_at")
+    if type(source_item_id) is not str or not source_item_id.strip():
+        raise ValueError("source_item_id must be a non-empty exact identity")
+    if not isinstance(db_path, (str, Path)) or not Path(db_path).is_file():
+        raise ValueError("db_path must name an existing database file")
+    if type(max_claims) is not int or not 1 <= max_claims <= 1000:
+        raise ValueError("max_claims must be an integer from 1 to 1000")
+    connection = sqlite3.connect(str(db_path), isolation_level=None, timeout=10.0)
+    connection.execute("PRAGMA busy_timeout=10000")
+    try:
+        _require_v5(connection)
+        if not _has_schema_v7(connection):
+            raise ValueError("bounded re-verification requires schema v7 provenance")
+        if _has_schema_v11(connection):
+            validate_v11(connection)
+        connection.execute("BEGIN IMMEDIATE")
+        if connection.execute(
+            "SELECT 1 FROM source_items WHERE source_item_id=?", (source_item_id,)
+        ).fetchone() is None:
+            raise ValueError("source_item_id does not identify an existing source item")
+        if not _source_item_is_fresh(connection, source_item_id, evaluated_at):
+            connection.commit()
+            return ReverificationReport(source_item_id)
+        pending = connection.execute(
+            """SELECT claim_id,subject FROM claims
+                 WHERE source_item_id=? AND status='pending'
+                 ORDER BY claim_id LIMIT ?""",
+            (source_item_id, max_claims),
+        ).fetchall()
+        eligible = tuple(
+            claim_id
+            for claim_id, subject in pending
+            if _claim_verification_state(connection, claim_id, str(subject))
+            is VerificationState.VERIFIED
+        )
+        for claim_id in eligible:
+            connection.execute(
+                "UPDATE claims SET status='verified' WHERE claim_id=? AND status='pending'",
+                (claim_id,),
+            )
+        versions = 0
+        if eligible:
+            placeholders = ",".join("?" for _ in eligible)
+            events = connection.execute(
+                f"""SELECT DISTINCT ev.event_id,ev.version,ev.summary,ev.valid_from
+                      FROM event_claims ec
+                      JOIN event_versions ev ON ev.event_id=ec.event_id
+                                             AND ev.version=ec.event_version
+                      JOIN (SELECT event_id,MAX(version) AS version
+                              FROM event_versions GROUP BY event_id) latest
+                        ON latest.event_id=ev.event_id AND latest.version=ev.version
+                     WHERE ec.claim_id IN ({placeholders})
+                       AND ev.verification_state='unverified'
+                     ORDER BY ev.event_id""",
+                eligible,
+            ).fetchall()
+            for event_id, current_version, summary, prior_valid_from in events:
+                prior_time = datetime.fromisoformat(prior_valid_from[:-1] + "+00:00")
+                evaluated_time = datetime.fromisoformat(evaluated_at[:-1] + "+00:00")
+                if evaluated_time <= prior_time:
+                    raise ValueError("evaluated_at must follow the linked event's latest version")
+                linked = tuple(
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT claim_id FROM event_claims WHERE event_id=? AND event_version=? ORDER BY claim_id",
+                        (event_id, current_version),
+                    )
+                )
+                if not linked or not all(
+                    (status := connection.execute(
+                        "SELECT status,subject FROM claims WHERE claim_id=?", (claim_id,)
+                    ).fetchone())
+                    and status[0] == "verified"
+                    and _claim_verification_state(connection, claim_id, str(status[1]))
+                    is VerificationState.VERIFIED
+                    for claim_id in linked
+                ):
+                    continue
+                next_version = current_version + 1
+                connection.execute(
+                    """INSERT INTO event_versions(
+                           event_id,version,material_change_reason,summary,
+                           verification_state,valid_from,superseded_at,verified_at)
+                       VALUES(?,?,?,?,'verified',?,NULL,?)""",
+                    (event_id, next_version, "claim_reverification", summary, evaluated_at, evaluated_at),
+                )
+                for claim_id in linked:
+                    connection.execute(
+                        "INSERT INTO event_claims(event_id,event_version,claim_id) VALUES(?,?,?)",
+                        (event_id, next_version, claim_id),
+                    )
+                connection.execute(
+                    "UPDATE event_versions SET superseded_at=? WHERE event_id=? AND version=? AND superseded_at IS NULL",
+                    (evaluated_at, event_id, current_version),
+                )
+                versions += 1
+        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise sqlite3.IntegrityError(f"foreign-key violations: {violations[:3]}")
+    except Exception:
+        connection.rollback()
+        raise
+    else:
+        connection.commit()
+    finally:
+        connection.close()
+    return ReverificationReport(source_item_id, len(pending), len(eligible), versions)
 
 
 def _v7_evidence_row(row: tuple, claim_subject: str) -> dict[str, object]:
