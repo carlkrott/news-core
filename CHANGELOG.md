@@ -4,6 +4,10 @@ All notable changes to the public news-core source are recorded here.
 
 ## [Unreleased]
 
+- Bounded claim re-verification now accepts the persisted first-party
+  llama.cpp release-API `published_at` as date evidence only when adapter,
+  canonical release identity, raw timestamp and enabled exact-authority
+  provenance agree; other `metadata:` dates remain rejected.
 - Publication preparation for the delivery-disabled, containerized news core.
 - Added the closed public-export workflow and safety-review metadata.
 - Added version-2 subject contracts with deterministic category-to-subject

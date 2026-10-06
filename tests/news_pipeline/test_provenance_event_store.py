@@ -202,3 +202,137 @@ class V7EventStoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FirstPartyReleaseEvidenceTests(unittest.TestCase):
+    URL = "https://github.com/ggml-org/llama.cpp/releases/tag/v0.6.0"
+    RAW_PUBLISHED = "2026-10-05T16:56:22Z"
+    EVALUATED = "2026-10-06T12:00:00Z"
+
+    def _build(self, **override) -> tuple[tempfile.TemporaryDirectory, Path]:
+        cfg = {
+            "source_id": "github-llamacpp-release", "category": "our_setup",
+            "publisher": "llama.cpp", "method": "github-release-api",
+            "url": self.URL, "published_at": self.RAW_PUBLISHED,
+            "evidence": f"metadata:{self.RAW_PUBLISHED}",
+            "raw_published": self.RAW_PUBLISHED, "raw_url": self.URL,
+            "raw_tag": "v0.6.0", "rule_id": "llama-cpp-own-release",
+            "entities": ("llama.cpp",), "group": "ggml-org-llama.cpp-origin",
+            "scope": ("our_setup",), "enabled": True,
+        }
+        cfg.update(override)
+        directory = tempfile.TemporaryDirectory()
+        path = Path(directory.name) / "state.db"
+        init_db(str(path))
+        c = sqlite3.connect(path)
+        c.execute("PRAGMA foreign_keys=ON")
+        for n, fn in enumerate((migrate_v3, migrate_v4, migrate_v5, migrate_v6, migrate_v7)):
+            fn(c, f"2026-10-05T00:00:0{n}Z")
+        c.execute("INSERT INTO runs VALUES (?,?,?,?,?,?,?)",
+                  ("r", APPLIED_AT, None, "historical_replay", "observed_historical", None, None))
+        c.execute(
+            "INSERT INTO source_registry VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (cfg["source_id"], "rss", "primary", "github.com", '["our_setup"]', 1, "[]", "[]", "[]", "[]", "[]", 60, None, None, None, "a" * 64, APPLIED_AT),
+        )
+        raw = json.dumps({"id": 1, "tag_name": cfg["raw_tag"], "name": "v0.6.0",
+                          "html_url": cfg["raw_url"], "published_at": cfg["raw_published"],
+                          "updated_at": None, "body": "notes"}, sort_keys=True)
+        c.execute(
+            "INSERT INTO source_items VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("i", cfg["source_id"], "1", cfg["category"], cfg["url"], cfg["url"], cfg["publisher"],
+             "primary", None, cfg["method"], "b" * 64, "v0.6.0", "notes", raw,
+             "2026-10-06T07:00:00Z", cfg["published_at"], None, cfg["evidence"]),
+        )
+        c.execute("INSERT INTO decisions VALUES (?,?,?,?,?,?,?)",
+                  ("d", "r", None, "keep", json.dumps({"source_item_id": "i"}), "2026-10-06T07:01:00Z", "phase3"))
+        c.commit()
+        c.close()
+        process_phase4(path, "2026-10-06T07:02:00Z")
+        c = sqlite3.connect(path)
+        c.execute("PRAGMA foreign_keys=ON")
+        rule = PublisherRule(
+            cfg["rule_id"], "github.com", SourceRole.PRIMARY, cfg["group"],
+            cfg["scope"], cfg["entities"], audit_note="reviewed fixture",
+        )
+        backfill_source_item_provenance(
+            c, PublisherRegistry((rule,)), "2026-10-06T07:03:00Z", source_item_ids=("i",)
+        )
+        if not cfg["enabled"]:
+            c.execute("UPDATE publisher_registry SET enabled=0")
+        c.commit()
+        c.close()
+        return directory, path
+
+    def _run(self, **override):
+        directory, path = self._build(**override)
+        try:
+            result = reverify_source_item_claims(path, "i", override.pop("evaluated_at", self.EVALUATED))
+            c = sqlite3.connect(path)
+            try:
+                statuses = c.execute("SELECT DISTINCT status FROM claims").fetchall()
+                versions = c.execute("SELECT COUNT(*) FROM event_versions").fetchone()[0]
+            finally:
+                c.close()
+            return result, statuses, versions
+        finally:
+            directory.cleanup()
+
+    def test_official_release_metadata_date_is_accepted(self) -> None:
+        directory, path = self._build()
+        try:
+            first = reverify_source_item_claims(path, "i", self.EVALUATED)
+            self.assertGreater(first.claims_verified, 0)
+            self.assertEqual(first.versions_appended, 1)
+            replay = reverify_source_item_claims(path, "i", "2026-10-06T12:05:00Z")
+            self.assertEqual((replay.claims_selected, replay.claims_verified, replay.versions_appended), (0, 0, 0))
+            c = sqlite3.connect(path)
+            try:
+                self.assertEqual(c.execute("SELECT DISTINCT status FROM claims").fetchall(), [("verified",)])
+                self.assertEqual(c.execute("SELECT version,verification_state FROM event_versions ORDER BY version").fetchall(), [(1, "unverified"), (2, "verified")])
+                self.assertEqual(c.execute("SELECT publication_evidence FROM source_items").fetchone()[0], f"metadata:{self.RAW_PUBLISHED}")
+                self.assertEqual(c.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            finally:
+                c.close()
+        finally:
+            directory.cleanup()
+
+    def _assert_rejected(self, **override) -> None:
+        result, statuses, versions = self._run(**override)
+        self.assertEqual((result.claims_selected, result.claims_verified, result.versions_appended), (0, 0, 0))
+        self.assertEqual(statuses, [("pending",)])
+        self.assertEqual(versions, 1)
+
+    def test_unrelated_metadata_source_is_rejected(self) -> None:
+        self._assert_rejected(source_id="other-source")
+
+    def test_wrong_retrieval_method_is_rejected(self) -> None:
+        self._assert_rejected(method="rss")
+
+    def test_altered_raw_timestamp_is_rejected(self) -> None:
+        self._assert_rejected(raw_published="2026-10-05T16:56:23Z")
+
+    def test_altered_stored_date_is_rejected(self) -> None:
+        self._assert_rejected(published_at="2026-10-06T11:00:00Z")
+
+    def test_non_release_evidence_is_rejected(self) -> None:
+        self._assert_rejected(evidence="unparseable")
+
+    def test_mismatched_release_identity_is_rejected(self) -> None:
+        self._assert_rejected(raw_tag="v0.7.0")
+        self._assert_rejected(raw_url="https://github.com/ggml-org/llama.cpp/releases/tag/v0.7.0")
+        self._assert_rejected(
+            url="https://github.com/other/repo/releases/tag/v0.6.0",
+            raw_url="https://github.com/other/repo/releases/tag/v0.6.0",
+        )
+
+    def test_mismatched_or_disabled_provenance_is_rejected(self) -> None:
+        self._assert_rejected(rule_id="other-rule")
+        self._assert_rejected(entities=("Other",))
+        self._assert_rejected(group="other-group")
+        self._assert_rejected(enabled=False)
+
+    def test_stale_and_future_publications_are_rejected(self) -> None:
+        stale = "2026-08-01T00:00:00Z"
+        self._assert_rejected(published_at=stale, raw_published=stale, evidence=f"metadata:{stale}")
+        future = "2026-10-07T00:00:00Z"
+        self._assert_rejected(published_at=future, raw_published=future, evidence=f"metadata:{future}")
