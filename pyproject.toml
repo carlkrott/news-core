@@ -29,6 +29,7 @@ news-process = "news_pipeline.jobs:cli_process"
 news-daily-report = "news_pipeline.jobs:cli_daily_report"
 news-daily-close = "news_pipeline.jobs:cli_daily_close"
 news-health = "news_pipeline.jobs:cli_health"
+news-reverify-claims = "news_pipeline.reverify_cli:main"
 
 [tool.setuptools]
 # The package layout under ``scripts/`` is intentional: the runtime image
