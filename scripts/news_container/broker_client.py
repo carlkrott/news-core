@@ -46,6 +46,7 @@ from .broker_protocol import (
     PROTOCOL_VERSION,
     RESPONSE_ENVELOPE_MAX_BYTES,
     ROUTE_FEED,
+    ROUTE_ARTICLE,
     ROUTE_SEARCH,
     BrokerProtocolError,
     BrokerRequest,
@@ -529,11 +530,42 @@ def broker_transport_factory(
     )
 
 
+def broker_article_transport_factory(
+    contract: SourceContract,
+    *,
+    env: Mapping[str, str] | None = None,
+    default_timeout: float = 10.0,
+    default_max_bytes: int = 512 * 1024,
+) -> Transport:
+    """Build the separate exact-host article route transport for one source."""
+    environ = env if env is not None else os.environ
+    try:
+        socket_path = socket_path_for_route(ROUTE_ARTICLE, env=environ)
+    except BrokerProtocolError as exc:
+        raise BrokerUnavailableError(
+            f"no article broker route for source {contract.source_id}: {exc}"
+        ) from exc
+    if container_mode_enabled(environ) and not os.path.exists(socket_path):
+        raise BrokerUnavailableError(
+            f"container mode requires article broker socket at {socket_path}; refusing direct egress",
+            socket_path=socket_path,
+        )
+    return BrokerTransport(
+        socket_path=socket_path,
+        route=ROUTE_ARTICLE,
+        timeout_seconds=default_timeout,
+        max_bytes=default_max_bytes,
+        source_id=contract.source_id,
+        env=environ,
+    )
+
+
 __all__ = [
     "BrokerTransport",
     "BrokerUnavailableError",
     "BrokerProtocolMismatch",
     "broker_transport_factory",
+    "broker_article_transport_factory",
     "container_mode_enabled",
     "route_for_source",
 ]

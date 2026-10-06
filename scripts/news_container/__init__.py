@@ -46,6 +46,7 @@ DELIVERY_KIND_FORBIDDEN = "delivery"
 def __getattr__(name: str):  # pragma: no cover - trivial re-export
     if name in (
         "broker_transport_factory",
+        "broker_article_transport_factory",
         "container_mode_enabled",
         "route_for_source",
         "BrokerTransport",

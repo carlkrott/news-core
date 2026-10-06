@@ -65,6 +65,12 @@ allowed_hosts = [
 ]
 max_redirects = 3
 
+# Publisher pages use a separate, exact-host route. This route is disabled
+# unless explicitly enabled here and the ingest feature flag is also set.
+[article]
+enabled = false
+allowed_hosts = []
+
 # ----------------------------------------------------------------------
 # [llm] — fixed-origin, forced-model LLM chat-completions call.
 # ----------------------------------------------------------------------

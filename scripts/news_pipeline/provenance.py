@@ -56,6 +56,7 @@ class PublisherRule:
     independence_group: str
     categories: tuple[str, ...]
     authority_entities: tuple[str, ...] = ()
+    allow_article_fetch: bool = False
     enabled: bool = True
     audit_note: str = ""
 
@@ -74,6 +75,8 @@ class PublisherRule:
         object.__setattr__(self, "authority_entities", authority_entities)
         if type(self.enabled) is not bool:
             raise ValueError("enabled must be a boolean")
+        if type(self.allow_article_fetch) is not bool:
+            raise ValueError("allow_article_fetch must be a boolean")
         _text("audit_note", self.audit_note, optional=True)
 
 
@@ -172,6 +175,19 @@ class PublisherRegistry:
             "matched_rule",
         )
 
+    def article_fetch_allowed(self, canonical_url: str, *, category: str) -> bool:
+        """Require an enabled primary rule explicitly granting exact-host fetch."""
+        host = normalize_publisher_host(canonical_url)
+        return any(
+            rule.enabled
+            and rule.allow_article_fetch
+            and rule.source_role is SourceRole.PRIMARY
+            and category in rule.categories
+            and bool(rule.authority_entities)
+            and rule.host == host
+            for rule in self._rules
+        )
+
 
 def _exact_keys(name: str, value: Mapping[str, Any], required: set[str], optional: set[str]) -> None:
     actual = set(value)
@@ -209,7 +225,7 @@ def load_provenance(path: str | Path) -> ProvenanceConfig:
             f"publishers[{index}]",
             entry,
             {"rule_id", "host", "source_role", "independence_group", "categories"},
-            {"authority_entities", "enabled", "audit_note"},
+            {"authority_entities", "allow_article_fetch", "enabled", "audit_note"},
         )
         rules.append(
             PublisherRule(
@@ -219,6 +235,7 @@ def load_provenance(path: str | Path) -> ProvenanceConfig:
                 independence_group=entry["independence_group"],
                 categories=_toml_strings("categories", entry["categories"]),
                 authority_entities=_toml_strings("authority_entities", entry.get("authority_entities", [])),
+                allow_article_fetch=entry.get("allow_article_fetch", False),
                 enabled=entry.get("enabled", True),
                 audit_note=entry.get("audit_note", ""),
             )

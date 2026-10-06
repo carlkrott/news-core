@@ -7,7 +7,7 @@
 #      ~/.config/systemd/user/news-egress-broker@.service
 #   cp deploy/systemd/news-egress-broker.env.example \
 #      ~/.config/systemd/user/news-egress-broker@search.env
-#   # repeat for feed, llm
+#   # repeat for feed, llm; article remains disabled until explicitly policy-approved
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now news-egress-broker@search.service
 #

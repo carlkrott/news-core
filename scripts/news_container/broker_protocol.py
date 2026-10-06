@@ -44,7 +44,8 @@ PROTOCOL_VERSION = 1
 # time. Delivery / LLM routes are intentionally absent from this slice.
 ROUTE_SEARCH = "search"
 ROUTE_FEED = "feed"
-ALLOWED_ROUTES: frozenset[str] = frozenset({ROUTE_SEARCH, ROUTE_FEED})
+ROUTE_ARTICLE = "article"
+ALLOWED_ROUTES: frozenset[str] = frozenset({ROUTE_SEARCH, ROUTE_FEED, ROUTE_ARTICLE})
 
 # Headers that the ingest path is permitted to forward to the broker.
 # Any other header (Authorization, Cookie, X-*, etc.) is rejected by
@@ -73,6 +74,7 @@ MAX_BYTES_HARD_LIMIT: int = 8 * 1024 * 1024
 # socket path for each route. The names are stable across the wire.
 ENV_SEARCH_SOCKET = "NEWS_BROKER_SEARCH_SOCKET"
 ENV_FEED_SOCKET = "NEWS_BROKER_FEED_SOCKET"
+ENV_ARTICLE_SOCKET = "NEWS_BROKER_ARTICLE_SOCKET"
 ENV_CONTAINER_MODE = "NEWS_CONTAINER_MODE"
 
 
@@ -704,6 +706,7 @@ def socket_path_for_route(
     mapping = {
         ROUTE_SEARCH: ENV_SEARCH_SOCKET,
         ROUTE_FEED: ENV_FEED_SOCKET,
+        ROUTE_ARTICLE: ENV_ARTICLE_SOCKET,
     }
     var = mapping[route]
     environ = env if env is not None else _os_environ()
@@ -730,6 +733,7 @@ __all__ = [
     "PROTOCOL_VERSION",
     "ROUTE_SEARCH",
     "ROUTE_FEED",
+    "ROUTE_ARTICLE",
     "ALLOWED_ROUTES",
     "ALLOWED_HEADERS",
     "DEFAULT_TIMEOUT_SECONDS",
@@ -739,6 +743,7 @@ __all__ = [
     "RESPONSE_ENVELOPE_MAX_BYTES",
     "ENV_SEARCH_SOCKET",
     "ENV_FEED_SOCKET",
+    "ENV_ARTICLE_SOCKET",
     "ENV_CONTAINER_MODE",
     "BrokerProtocolError",
     "UnsupportedRouteError",

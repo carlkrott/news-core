@@ -28,6 +28,7 @@ from .adapters.base import (
     RetryableHttpError,
     Transport,
 )
+from .article_fetch import fetch_publisher_article
 from .adapters.rss import RssAdapter
 from .adapters.github import GitHubReleaseAdapter
 from .adapters.searxng import SearxngAdapter
@@ -62,6 +63,7 @@ AsyncSleep = Callable[[float], Awaitable[None]]
 Monotonic = Callable[[], float]
 UtcNow = Callable[[], str]
 TransportFactory = Callable[[SourceContract], Transport | None]
+ArticleTransportFactory = Callable[[SourceContract], Transport]
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +203,8 @@ async def run_ingest(
     provenance_path: str | Path | None = None,
     max_queries: int | None = None,
     transport_factory: TransportFactory | None = None,
+    article_fetch_enabled: bool = False,
+    article_transport_factory: ArticleTransportFactory | None = None,
     async_sleep: AsyncSleep = asyncio.sleep,
     monotonic: Monotonic = time.monotonic,
     utc_now: UtcNow | None = None,
@@ -212,6 +216,10 @@ async def run_ingest(
     _parse_utc(run_started_at, "run_started_at")
     if max_queries is not None and (type(max_queries) is not int or max_queries < 1):
         raise ValueError("max_queries must be a positive integer")
+    if type(article_fetch_enabled) is not bool:
+        raise ValueError("article_fetch_enabled must be boolean")
+    if article_fetch_enabled and article_transport_factory is None:
+        raise ValueError("article_fetch_enabled requires an explicit article transport")
     requested = None if source_ids is None else tuple(source_ids)
     if requested is not None:
         if not requested or any(type(value) is not str or not value for value in requested):
@@ -259,6 +267,9 @@ async def run_ingest(
                     gate=gates[_host_key(job.source.host)],
                     global_semaphore=global_semaphore,
                     transport_factory=transport_factory,
+                    article_fetch_enabled=article_fetch_enabled,
+                    article_transport_factory=article_transport_factory,
+                    provenance_registry=provenance_registry,
                     sleep=async_sleep,
                     monotonic=monotonic,
                     now=now,
@@ -570,6 +581,9 @@ async def _fetch_job(
     gate: _HostGate,
     global_semaphore: asyncio.Semaphore,
     transport_factory: TransportFactory | None,
+    article_fetch_enabled: bool,
+    article_transport_factory: ArticleTransportFactory | None,
+    provenance_registry: PublisherRegistry,
     sleep: AsyncSleep,
     monotonic: Monotonic,
     now: UtcNow,
@@ -628,7 +642,71 @@ async def _fetch_job(
         ):
             break
     assert result is not None
+    if (
+        article_fetch_enabled
+        and article_transport_factory is not None
+        and job.source.adapter_type is SourceAdapter.RSS
+        and result.is_success
+        and result.items
+    ):
+        retrieved_at = _validated_now(now)
+        fetched_at = _parse_utc(retrieved_at, "retrieved_at")
+        candidate = next(
+            (
+                item for item in result.items
+                if item.published_at is not None
+                and _article_age_is_bounded(item.published_at, fetched_at)
+                and provenance_registry.article_fetch_allowed(
+                    item.canonical_url, category=item.category
+                )
+            ),
+            None,
+        )
+        if candidate is not None:
+            article_transport = article_transport_factory(job.source)
+
+            async def fetch_article() -> FetchResult:
+                fetched = await fetch_publisher_article(
+                    candidate, article_transport, retrieved_at=retrieved_at
+                )
+                if fetched is None:
+                    return FetchResult()
+                return FetchResult(items=(fetched,), http_status=200)
+
+            article_result = await gate.call(
+                fetch_article,
+                global_semaphore=global_semaphore,
+                sleep=sleep,
+                monotonic=monotonic,
+            )
+            if article_result.items:
+                replacement = article_result.items[0]
+                result = FetchResult(
+                    items=tuple(
+                        replacement if item.source_item_id == candidate.source_item_id else item
+                        for item in result.items
+                    ),
+                    rejections=result.rejections,
+                    http_status=result.http_status,
+                    validators=result.validators,
+                    cursor=result.cursor,
+                    rate_limit_reset=result.rate_limit_reset,
+                    rate_limit_remaining=result.rate_limit_remaining,
+                    retry_after=result.retry_after,
+                    error=result.error,
+                    retryable=result.retryable,
+                )
     return _NetworkOutcome(job, result, _validated_now(now), retries)
+
+
+def _article_age_is_bounded(published_at: str, fetched_at: datetime) -> bool:
+    """Accept only canonical, non-future publication dates within 30 days."""
+    try:
+        published = _parse_utc(published_at, "published_at")
+    except ValueError:
+        return False
+    age = fetched_at - published
+    return timedelta(0) <= age <= timedelta(days=30)
 
 
 def _persist_outcome(
