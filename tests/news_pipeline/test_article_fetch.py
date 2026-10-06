@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import unittest
+from argparse import Namespace
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from news_pipeline.adapters.base import FetchResponse, NormalizedItem
 from news_pipeline.article_fetch import fetch_publisher_article
+from news_pipeline import jobs
+from news_container.broker_client import broker_article_transport_factory
 from news_pipeline.live_contracts import SourceRole
 from news_pipeline.provenance import PublisherRegistry, PublisherRule
 
@@ -93,3 +99,20 @@ class ArticleFetchPolicyTests(unittest.TestCase):
         self.assertFalse(disabled.article_fetch_allowed(
             "https://archlinux.org/news/example/", category="our_setup"
         ))
+
+
+class ArticleFetchJobWiringTests(unittest.TestCase):
+    def test_article_broker_is_opt_in_without_switching_feed_or_search_transport(self):
+        args = Namespace(
+            enable_network=True, sources="sources.toml", topics="topics.toml",
+            policy="policy.toml", run_started_at="2026-10-06T08:00:00Z",
+            db="state.db", source_ids=None, provenance=None, max_queries=1, control_db=None,
+        )
+        report = SimpleNamespace()
+        with patch.dict(os.environ, {"NEWS_PUBLISHER_ARTICLE_FETCH": "1"}, clear=True):
+            with patch("news_pipeline.ingest_runner.run_ingest_sync", return_value=report) as ingest:
+                self.assertEqual(jobs._run_tick(args), 0)
+        options = ingest.call_args.kwargs
+        self.assertIsNone(options["transport_factory"])
+        self.assertTrue(options["article_fetch_enabled"])
+        self.assertIs(options["article_transport_factory"], broker_article_transport_factory)
