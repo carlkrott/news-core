@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Iterable, Mapping, cast
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from .claim_pipeline import claims_from_observation, observation_from_source_item, persist_claim_rows_counts
 from .adapters.base import normalize_timestamp
@@ -57,6 +57,19 @@ class Phase4Report:
     def processed_count(self): return self.processed
     @property
     def event_versions_inserted(self): return self.versions_appended
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseClaimRegenerationReport:
+    source_item_id: str
+    claims_inserted: int = 0
+    evidence_inserted: int = 0
+    claims_verified: int = 0
+    events_created: int = 0
+    versions_appended: int = 0
+    event_links_inserted: int = 0
+    claim_id: str = ""
+    event_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,6 +492,148 @@ def reverify_source_item_claims(
     finally:
         connection.close()
     return ReverificationReport(source_item_id, len(pending), len(eligible), versions)
+
+
+def regenerate_release_claim(
+    db_path: str | Path,
+    source_item_id: str,
+    evaluated_at: str,
+) -> ReleaseClaimRegenerationReport:
+    """Regenerate the one exact release-tag claim for one persisted llama.cpp release.
+
+    The claim is re-extracted from the immutable persisted release record under
+    the CURRENT enabled exact publisher rule. Pre-existing claims, evidence,
+    snapshots and event versions (including claims frozen before the rule
+    existed) are never modified. The regenerated claim gets its own identity
+    (its subject participates in the id), its own provenance snapshot, and --
+    only when it genuinely verifies -- its own verified event version. Nothing
+    is written when the item is not fresh, not the policy-bound release, or the
+    tag fact does not verify; replaying the same item is a no-op.
+    """
+    _timestamp(evaluated_at, "evaluated_at")
+    if type(source_item_id) is not str or not source_item_id.strip():
+        raise ValueError("source_item_id must be a non-empty exact identity")
+    if not isinstance(db_path, (str, Path)) or not Path(db_path).is_file():
+        raise ValueError("db_path must name an existing database file")
+    connection = sqlite3.connect(str(db_path), isolation_level=None, timeout=10.0)
+    connection.execute("PRAGMA busy_timeout=10000")
+    try:
+        _require_v5(connection)
+        if not _has_schema_v11(connection):
+            raise ValueError("release claim regeneration requires schema v11 provenance")
+        validate_v11(connection)
+        connection.execute("BEGIN IMMEDIATE")
+        if connection.execute(
+            "SELECT 1 FROM source_items WHERE source_item_id=?", (source_item_id,)
+        ).fetchone() is None:
+            raise ValueError("source_item_id does not identify an existing source item")
+        if not _first_party_release_date_is_trusted(connection, source_item_id):
+            raise ValueError("source item is not the policy-bound first-party llama.cpp release")
+        if not _source_item_is_fresh(connection, source_item_id, evaluated_at):
+            connection.rollback()
+            return ReleaseClaimRegenerationReport(source_item_id)
+        columns = tuple(r[1] for r in connection.execute("PRAGMA table_info(source_items)")) + (
+            "normalized_publisher_host", "effective_source_role", "independence_group",
+            "matched_rule_id", "authority_match", "classification_reason",
+            "authority_scope_json", "authority_entities_json", "classification_timestamp",
+        )
+        source_row = connection.execute(
+            """SELECT si.*,
+                      sp.normalized_publisher_host,sp.effective_source_role,sp.independence_group,
+                      sp.matched_rule_id,sp.authority_match,sp.classification_reason,
+                      pr.category_scope_json,pr.authority_entities_json,
+                      sp.classification_timestamp
+                 FROM source_items si
+                 JOIN source_item_provenance sp ON sp.source_item_id=si.source_item_id
+                 JOIN publisher_registry pr ON pr.rule_id=sp.matched_rule_id AND pr.enabled=1
+                WHERE si.source_item_id=?""",
+            (source_item_id,),
+        ).fetchone()
+        if source_row is None:
+            raise ValueError("source item lacks enabled exact publisher provenance")
+        observation = observation_from_source_item(dict(zip(columns, source_row)))
+        extracted = claims_from_observation(observation, extracted_at=evaluated_at)
+        tag = unquote(urlsplit(observation.canonical_url).path[len(_RELEASE_PAGE_PREFIX):])
+        version = tag[1:] if tag.startswith("v") else tag
+        if (
+            len(extracted.claims) != 1
+            or len(extracted.evidence) != 1
+            or extracted.claims[0].subject != "llama.cpp"
+            or extracted.claims[0].predicate != "has_version"
+            or extracted.claims[0].object_value != version
+            or extracted.evidence[0].claim_id != extracted.claims[0].claim_id
+            or extracted.evidence[0].exact_excerpt not in (observation.title or "")
+        ):
+            raise ValueError("source item does not yield the exact grounded release-tag claim")
+        old_claim, old_evidence = extracted.claims[0], extracted.evidence[0]
+        claim_id = stable_id(
+            "claim", observation.observation_id, "release_tag_regeneration",
+            old_claim.subject, old_claim.object_value, old_evidence.exact_excerpt,
+        )
+        evidence_id = stable_id(
+            "evidence", claim_id, observation.observation_id, old_evidence.exact_excerpt
+        )
+        rows = replace(
+            extracted,
+            claims=(replace(old_claim, claim_id=claim_id),),
+            evidence=(replace(old_evidence, evidence_id=evidence_id, claim_id=claim_id),),
+        )
+        if connection.execute(
+            "SELECT 1 FROM claims WHERE claim_id=?", (claim_id,)
+        ).fetchone() is not None:
+            connection.rollback()
+            return ReleaseClaimRegenerationReport(source_item_id, claim_id=claim_id)
+        if connection.execute(
+            "SELECT 1 FROM claims WHERE subject=? AND predicate=? AND object_value=? AND source_item_id=?",
+            ("llama.cpp", "has_version", version, source_item_id),
+        ).fetchone() is not None:
+            raise ValueError("an equivalent claim already exists for this source item")
+        claims_inserted, evidence_inserted = persist_claim_rows_counts(connection, rows)
+        if _claim_verification_state(connection, claim_id, "llama.cpp") is not VerificationState.VERIFIED:
+            connection.rollback()
+            return ReleaseClaimRegenerationReport(source_item_id, claim_id=claim_id)
+        connection.execute(
+            "UPDATE claims SET status='verified' WHERE claim_id=? AND status='pending'",
+            (claim_id,),
+        )
+        event_id = stable_id("phase4-event", "llama.cpp", "has_version", version, length=32)
+        if connection.execute("SELECT 1 FROM events WHERE id=?", (event_id,)).fetchone() is not None:
+            raise ValueError("an event already exists for the regenerated release claim")
+        run_id = stable_id("release-claim-regeneration-run", source_item_id, evaluated_at, length=64)
+        connection.execute(
+            "INSERT INTO runs(id,started_at,finished_at,kind,provenance,source_dir,notes) VALUES (?,?,?,?,?,?,?)",
+            (run_id, evaluated_at, evaluated_at, "historical_replay", "observed_historical",
+             str(db_path), json.dumps({"operator": "regenerate_release_claim", "source_item_id": source_item_id},
+                                      sort_keys=True, separators=(",", ":"))),
+        )
+        connection.execute(
+            "INSERT INTO events(id,run_id,category,started_at,ended_at,article_count,observation_count,status) VALUES (?,?,?,?,?,?,?,?)",
+            (event_id, run_id, observation.category, evaluated_at, None, 0, 0, "complete"),
+        )
+        connection.execute(
+            """INSERT INTO event_versions(
+                   event_id,version,material_change_reason,summary,
+                   verification_state,valid_from,superseded_at,verified_at)
+               VALUES(?,?,?,?,'verified',?,NULL,?)""",
+            (event_id, 1, "distinct", old_evidence.exact_excerpt, evaluated_at, evaluated_at),
+        )
+        connection.execute(
+            "INSERT INTO event_claims(event_id,event_version,claim_id) VALUES(?,?,?)",
+            (event_id, 1, claim_id),
+        )
+        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise sqlite3.IntegrityError(f"foreign-key violations: {violations[:3]}")
+    except Exception:
+        connection.rollback()
+        raise
+    else:
+        connection.commit()
+    finally:
+        connection.close()
+    return ReleaseClaimRegenerationReport(
+        source_item_id, claims_inserted, evidence_inserted, 1, 1, 1, 1, claim_id, event_id
+    )
 
 
 def _v7_evidence_row(row: tuple, claim_subject: str) -> dict[str, object]:
