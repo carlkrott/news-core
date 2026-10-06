@@ -124,16 +124,27 @@ def _run_tick(args: argparse.Namespace) -> int:
     from .ingest_runner import run_ingest_sync
     try:
         transport_factory = None
+        article_factory = None
+        article_fetch_enabled = os.environ.get("NEWS_PUBLISHER_ARTICLE_FETCH", "") == "1"
         if os.environ.get("NEWS_CONTAINER_MODE") == "1":
-            from news_container.broker_client import broker_transport_factory
+            from news_container.broker_client import (
+                broker_article_transport_factory,
+                broker_transport_factory,
+            )
 
             transport_factory = broker_transport_factory
+            if article_fetch_enabled:
+                article_factory = broker_article_transport_factory
+        elif article_fetch_enabled:
+            raise ValueError("publisher article fetch requires NEWS_CONTAINER_MODE=1 and the policy broker")
         report = run_ingest_sync(
             args.db, args.sources, args.topics, args.policy, args.run_started_at,
             source_ids=tuple(args.source_ids) if args.source_ids else None,
             provenance_path=args.provenance,
             max_queries=args.max_queries,
             transport_factory=transport_factory,
+            article_fetch_enabled=article_fetch_enabled,
+            article_transport_factory=article_factory,
         )
         investigations_enqueued: tuple[tuple[str, bool], ...] = ()
         if args.control_db:

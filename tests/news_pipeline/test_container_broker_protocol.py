@@ -267,7 +267,7 @@ class _FakeBroker:
 
 class EnvelopeTests(unittest.TestCase):
     def test_route_allowlist_only_search_and_feed(self) -> None:
-        self.assertEqual(ALLOWED_ROUTES, frozenset({"search", "feed"}))
+        self.assertEqual(ALLOWED_ROUTES, frozenset({"search", "feed", "article"}))
 
     def test_canonical_json_is_deterministic(self) -> None:
         env = BrokerRequest(

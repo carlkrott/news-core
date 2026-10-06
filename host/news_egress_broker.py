@@ -101,6 +101,10 @@ MAX_REQUEST_BYTES = 64 * 1024
 
 #: Maximum number of redirects the feed route will chase.
 MAX_FEED_REDIRECTS = 3
+#: Minimum per-host spacing for public publisher-page requests.
+ARTICLE_MIN_INTERVAL_SECONDS = 1.0
+_ARTICLE_RATE_LOCK = threading.Lock()
+_ARTICLE_LAST_REQUEST: dict[str, float] = {}
 
 #: Maximum accepted concurrent connection handlers per broker instance.
 MAX_ACTIVE_CONNECTIONS = 16
@@ -171,7 +175,7 @@ _BLOCKED_IPV6_PREFIXES: tuple[str, ...] = (
     "::",        # unspecified
 )
 
-ALLOWED_ROUTES: frozenset[str] = frozenset({"search", "feed", "llm"})
+ALLOWED_ROUTES: frozenset[str] = frozenset({"search", "feed", "article", "llm"})
 
 
 # ----------------------------------------------------------------------
@@ -417,6 +421,35 @@ class FeedPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class ArticlePolicy:
+    """Default-off exact-origin policy for publisher article retrieval."""
+
+    enabled: bool = False
+    allowed_hosts: tuple[FeedHost, ...] = ()
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any] | None) -> "ArticlePolicy":
+        if raw is None:
+            return cls()
+        _require_exact_keys("article", raw, frozenset({"enabled", "allowed_hosts"}))
+        enabled = raw.get("enabled", False)
+        if type(enabled) is not bool:
+            raise BrokerConfigError("article.enabled must be boolean")
+        hosts_raw = raw.get("allowed_hosts", [])
+        if not isinstance(hosts_raw, list):
+            raise BrokerConfigError("article.allowed_hosts must be a list of exact hostnames")
+        hosts = tuple(FeedHost.from_raw(entry) for entry in hosts_raw)
+        if len({entry.host for entry in hosts}) != len(hosts):
+            raise BrokerConfigError("article.allowed_hosts must not contain duplicates")
+        if enabled and not hosts:
+            raise BrokerConfigError("enabled article route requires exact allowed_hosts")
+        return cls(enabled=enabled, allowed_hosts=hosts)
+
+    def is_allowed(self, host: str) -> bool:
+        return any(entry.host == host.lower() for entry in self.allowed_hosts)
+
+
+@dataclass(frozen=True, slots=True)
 class LlmPolicy:
     """Configuration for the LLM route."""
 
@@ -471,6 +504,7 @@ class BrokerPolicy:
     search: SearchPolicy
     feed: FeedPolicy
     llm: LlmPolicy
+    article: ArticlePolicy = ArticlePolicy()
     log_level: str = "INFO"
 
     @classmethod
@@ -480,7 +514,7 @@ class BrokerPolicy:
         _require_exact_keys(
             "policy",
             raw,
-            frozenset({"version", "common", "search", "feed", "llm", "log_level"}),
+            frozenset({"version", "common", "search", "feed", "llm", "log_level", "article"}),
         )
         if raw.get("version") != 1:
             raise BrokerConfigError("policy.version must be integer 1")
@@ -490,6 +524,7 @@ class BrokerPolicy:
         search_raw = raw.get("search", {})
         feed_raw = raw.get("feed", {})
         llm_raw = raw.get("llm", {})
+        article_raw = raw.get("article")
         for label, section in (
             ("search", search_raw),
             ("feed", feed_raw),
@@ -505,6 +540,7 @@ class BrokerPolicy:
             search=SearchPolicy.from_mapping(search_raw),
             feed=FeedPolicy.from_mapping(feed_raw),
             llm=LlmPolicy.from_mapping(llm_raw),
+            article=ArticlePolicy.from_mapping(article_raw),
             log_level=log_level,
         )
 
@@ -984,15 +1020,16 @@ def _fetch_feed_once(
     timeout: float,
     resolved_ips: Sequence[str],
     opener: OpenerFn,
+    accept: str = (
+        "application/rss+xml, application/atom+xml, "
+        "application/xml;q=0.9, */*;q=0.5"
+    ),
 ) -> Any:
     """Issue one GET, pinning production traffic to a validated IP."""
     request = urllib.request.Request(
         url,
         headers={
-            "Accept": (
-                "application/rss+xml, application/atom+xml, "
-                "application/xml;q=0.9, */*;q=0.5"
-            ),
+            "Accept": accept,
             "User-Agent": f"news-egress-broker/{broker_protocol.PROTOCOL_VERSION}",
         },
         method="GET",
@@ -1123,6 +1160,74 @@ def handle_feed(
 # ----------------------------------------------------------------------
 # Response envelope assembly
 # ----------------------------------------------------------------------
+
+
+def _pace_article_host(host: str, *, deadline: float | None) -> None:
+    with _ARTICLE_RATE_LOCK:
+        now = time.monotonic()
+        wait_seconds = max(
+            0.0,
+            _ARTICLE_LAST_REQUEST.get(host, 0.0) + ARTICLE_MIN_INTERVAL_SECONDS - now,
+        )
+        if deadline is not None and wait_seconds >= max(0.0, deadline - now):
+            raise BrokerRequestError("article host rate limit exceeds request deadline")
+        if wait_seconds:
+            time.sleep(wait_seconds)
+        _ARTICLE_LAST_REQUEST[host] = time.monotonic()
+
+
+def handle_article(
+    envelope: Mapping[str, Any],
+    *,
+    common: CommonPolicy,
+    article: ArticlePolicy,
+    resolver: ResolverFn = default_resolver,
+    opener: OpenerFn = default_opener,
+    deadline: float | None = None,
+) -> broker_protocol.BrokerResponse:
+    """Fetch one public article from an exact-host allowlist, without redirects."""
+    request_id = envelope["request_id"]
+    if not article.enabled:
+        raise BrokerRequestError("publisher article route is disabled")
+    parsed = _validate_feed_target_url(envelope["target_url"])
+    host = parsed.hostname or ""
+    if not article.is_allowed(host):
+        raise BrokerRequestError("article host is not on the exact-origin policy allowlist")
+    if parsed.port not in (None, 443):
+        raise BrokerRequestError("article URL port rejected")
+    current_url = urllib.parse.urlunsplit(parsed)
+    _pace_article_host(host, deadline=deadline)
+    resolved_ips = _resolve_and_validate(host, port=443, resolver=resolver)
+    response: Any = None
+    try:
+        response = _fetch_feed_once(
+            current_url,
+            timeout=_remaining_timeout(deadline, common.timeout_seconds),
+            resolved_ips=resolved_ips,
+            opener=opener,
+            accept="text/html, application/xhtml+xml",
+        )
+        status = getattr(response, "status", None) or response.getcode()
+        if status in (301, 302, 303, 307, 308):
+            _close_upstream_response(response)
+            response = None
+            raise BrokerRequestError("publisher article redirects are not followed")
+        return _read_response_envelope(
+            response,
+            request_id=request_id,
+            fixed_final_url=current_url,
+            max_response_bytes=_effective_response_limit(
+                common.max_response_bytes, envelope.get("max_bytes")
+            ),
+            deadline=deadline,
+        )
+    except urllib.error.URLError as exc:
+        raise BrokerRequestError("article upstream error") from exc
+    except OSError as exc:
+        raise BrokerRequestError("article upstream error") from exc
+    finally:
+        if response is not None:
+            _close_upstream_response(response)
 
 
 def _close_upstream_response(response: Any) -> None:
@@ -1518,6 +1623,15 @@ def dispatch_envelope(
             envelope,
             common=common,
             feed=ctx.policy.feed,
+            resolver=ctx.resolver,
+            opener=ctx.opener,
+            deadline=deadline,
+        )
+    if ctx.route == "article":
+        return handle_article(
+            envelope,
+            common=common,
+            article=ctx.policy.article,
             resolver=ctx.resolver,
             opener=ctx.opener,
             deadline=deadline,

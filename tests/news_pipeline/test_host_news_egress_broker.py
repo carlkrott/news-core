@@ -869,6 +869,61 @@ class FeedRouteTests(unittest.TestCase):
         )
 
 
+class ArticleRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.policy = news_egress_broker.BrokerPolicy.from_mapping(
+            tomllib.loads(_policy_toml())
+        )
+        self.request = {
+            "request_id": "a" * 32, "route": "article",
+            "target_url": "https://archlinux.org/news/example/", "headers": [],
+            "timeout_seconds": 5.0, "max_bytes": 1024,
+            "retrieved_at": "2026-10-06T08:00:00Z",
+        }
+
+    def test_route_is_default_off(self):
+        with self.assertRaises(news_egress_broker.BrokerRequestError):
+            news_egress_broker.handle_article(
+                self.request, common=self.policy.common, article=self.policy.article,
+                resolver=lambda _host, _port: ["93.184.216.34"],
+            )
+
+    def test_exact_host_policy_rejects_subdomain_before_network(self):
+        from host.news_egress_broker import ArticlePolicy, FeedHost
+        policy = ArticlePolicy(True, (FeedHost("archlinux.org"),))
+        request = dict(self.request, target_url="https://sub.archlinux.org/news/example/")
+        resolver = mock.Mock(side_effect=AssertionError("DNS must not run"))
+        with self.assertRaises(news_egress_broker.BrokerRequestError):
+            news_egress_broker.handle_article(
+                request, common=self.policy.common, article=policy, resolver=resolver,
+            )
+        resolver.assert_not_called()
+
+    def test_article_redirect_is_refused_without_following_location(self):
+        from host.news_egress_broker import ArticlePolicy, FeedHost
+
+        class RedirectResponse:
+            status = 302
+            headers = {"Location": "https://other.example/article"}
+            def close(self):
+                return None
+            def getcode(self):
+                return self.status
+
+        policy = ArticlePolicy(True, (FeedHost("archlinux.org"),))
+        with mock.patch.object(
+            news_egress_broker, "_fetch_feed_once", return_value=RedirectResponse()
+        ) as fetch:
+            with self.assertRaises(news_egress_broker.BrokerRequestError) as caught:
+                news_egress_broker.handle_article(
+                    self.request, common=self.policy.common, article=policy,
+                    resolver=lambda _host, _port: ["93.184.216.34"],
+                )
+        self.assertIn("redirects are not followed", caught.exception.detail)
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(fetch.call_args.kwargs["accept"], "text/html, application/xhtml+xml")
+
+
 # ---------------------------------------------------------------------------
 # LLM route integration tests
 # ---------------------------------------------------------------------------
@@ -968,7 +1023,7 @@ class NoDeliveryTests(unittest.TestCase):
         self.assertNotIn("delivery", news_egress_broker.ALLOWED_ROUTES)
         self.assertEqual(
             news_egress_broker.ALLOWED_ROUTES,
-            frozenset({"search", "feed", "llm"}),
+            frozenset({"search", "feed", "article", "llm"}),
         )
 
     def test_cli_rejects_delivery_route(self) -> None:
