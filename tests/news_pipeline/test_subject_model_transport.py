@@ -16,6 +16,8 @@ from news_pipeline.briefing_summarizer import (
     SummarizerTransportError,
     SummarySource,
 )
+from news_pipeline.editorial_qc import SubjectEditorialInput, subject_policy
+from news_pipeline.models import Subject
 from news_pipeline.subject_model_transport import configured_transport
 
 
@@ -42,8 +44,32 @@ class _IncompleteReadResponse(_Response):
 class SubjectModelTransportTests(unittest.TestCase):
     def test_report_builder_uses_configured_route_for_one_model_call(self) -> None:
         calls: list[tuple[urllib.request.Request, float]] = []
+        input_item = SubjectEditorialInput(
+            subject=Subject.PROFESSIONAL_AV,
+            event_id="event-1",
+            event_version=1,
+            title="A verified event",
+            fact_deltas=(),
+            source_urls=("https://example.test/a",),
+            policy=subject_policy(Subject.PROFESSIONAL_AV),
+        )
+        model_content = json.dumps(
+            {
+                "items": [
+                    {
+                        "subject": Subject.PROFESSIONAL_AV.value,
+                        "event_id": input_item.event_id,
+                        "event_version": input_item.event_version,
+                        "what_changed": "A verified event occurred.",
+                        "why_it_matters": "It is relevant to the subject.",
+                        "source_url": input_item.source_urls[0],
+                        "fact_deltas": [],
+                    }
+                ]
+            }
+        )
         response = _Response(
-            json.dumps({"choices": [{"message": {"content": '{"items": []}'}}]}).encode()
+            json.dumps({"choices": [{"message": {"content": model_content}}]}).encode()
         )
 
         def opener(request: urllib.request.Request, *, timeout: float) -> _Response:
@@ -62,15 +88,21 @@ class SubjectModelTransportTests(unittest.TestCase):
             return_value=type("FakeOpener", (), {"open": staticmethod(opener)})(),
         ):
             summarizer = report_builder._default_subject_summarizer()
-            summarizer.summarize_category(
-                Category.AI,
-                (SummarizerInput("candidate-1", "A title", "A snippet", "https://example.test/a"),),
+            result = summarizer.summarize_subject(
+                Subject.PROFESSIONAL_AV, (input_item,)
             )
 
         self.assertEqual(len(calls), 1)
+        self.assertEqual(summarizer.model_call_count, 1)
+        self.assertEqual(len(result.items), 1)
+        self.assertIs(result.items[0].source, SummarySource.MODEL)
+        self.assertIsNone(result.items[0].error_category)
+        self.assertEqual(result.items[0].event_id, input_item.event_id)
         request, timeout = calls[0]
         self.assertEqual(request.full_url, "http://model.example.test/v1/chat/completions")
         self.assertEqual(json.loads(request.data)["model"], "approved-model")
+        request_content = json.loads(request.data)["messages"][1]["content"]
+        self.assertEqual(json.loads(request_content)["subject"], Subject.PROFESSIONAL_AV.value)
         self.assertEqual(timeout, 10.0)
         self.assertTrue(response.closed)
 
