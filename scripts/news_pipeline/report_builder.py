@@ -163,11 +163,16 @@ def _subject_schema_available(con: sqlite3.Connection) -> bool:
 
 def _default_subject_summarizer() -> Any:
     from .briefing_summarizer import SummarizerSession, SummarizerTransportError
+    from .subject_model_transport import configured_transport
 
-    def unavailable_transport(_request: bytes) -> bytes:
-        raise SummarizerTransportError("subject model transport is not configured")
+    try:
+        transport = configured_transport()
+    except ValueError:
+        def unavailable_transport(_request: bytes) -> bytes:
+            raise SummarizerTransportError("subject model transport is not configured")
 
-    return SummarizerSession(unavailable_transport)
+        transport = unavailable_transport
+    return SummarizerSession(transport)
 
 
 def _generation_receipts(grouped: dict[Subject, list[Any]]) -> dict[Subject, Any]:
