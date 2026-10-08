@@ -18,7 +18,8 @@ from news_pipeline.briefing_summarizer import (
 )
 from news_pipeline.editorial_qc import SubjectEditorialInput, subject_policy
 from news_pipeline.models import Subject
-from news_pipeline.subject_model_transport import configured_transport
+from news_pipeline import subject_model_transport
+from news_pipeline.subject_model_transport import configured_transport, timeout_from_p95
 
 
 class _Response:
@@ -103,7 +104,7 @@ class SubjectModelTransportTests(unittest.TestCase):
         self.assertEqual(json.loads(request.data)["model"], "approved-model")
         request_content = json.loads(request.data)["messages"][1]["content"]
         self.assertEqual(json.loads(request_content)["subject"], Subject.PROFESSIONAL_AV.value)
-        self.assertEqual(timeout, 10.0)
+        self.assertEqual(timeout, subject_model_transport._TIMEOUT_SECONDS)
         self.assertTrue(response.closed)
 
     def test_configured_route_sends_one_bounded_request_and_returns_content(self) -> None:
@@ -132,7 +133,7 @@ class SubjectModelTransportTests(unittest.TestCase):
         payload = json.loads(request.data)
         self.assertEqual(payload["model"], "approved-model")
         self.assertFalse(payload["stream"])
-        self.assertEqual(timeout, 10.0)
+        self.assertEqual(timeout, subject_model_transport._TIMEOUT_SECONDS)
         self.assertEqual(response.read_limit, 32769)
         self.assertTrue(response.closed)
 
@@ -279,6 +280,30 @@ class SubjectModelTransportTests(unittest.TestCase):
                 },
                 opener=lambda *_args, **_kwargs: self.fail("must not call transport"),
             )
+
+
+class TimeoutRuleTests(unittest.TestCase):
+    def test_timeout_is_ceil_of_p95_times_margin(self) -> None:
+        self.assertEqual(timeout_from_p95(10.0, margin=2.0, minimum=5.0, maximum=60.0), 20.0)
+        self.assertEqual(timeout_from_p95(10.1, margin=1.5, minimum=5.0, maximum=60.0), 16.0)
+
+    def test_timeout_is_bounded_by_min_and_max(self) -> None:
+        self.assertEqual(timeout_from_p95(0.5, margin=2.0, minimum=5.0, maximum=60.0), 5.0)
+        self.assertEqual(timeout_from_p95(100.0, margin=2.0, minimum=5.0, maximum=60.0), 60.0)
+
+    def test_timeout_rejects_invalid_inputs(self) -> None:
+        for p95 in (0.0, -1.0, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                timeout_from_p95(p95)
+
+    def test_configured_timeout_follows_documented_rule(self) -> None:
+        m = subject_model_transport
+        self.assertEqual(
+            m._TIMEOUT_SECONDS,
+            timeout_from_p95(m._MEASURED_P95_SECONDS, margin=m._TIMEOUT_MARGIN,
+                             minimum=m._TIMEOUT_MIN_SECONDS, maximum=m._TIMEOUT_MAX_SECONDS),
+        )
+        self.assertGreater(m._TIMEOUT_SECONDS, m._MEASURED_P95_SECONDS)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import math
 import os
 import urllib.error
 import urllib.parse
@@ -15,7 +16,35 @@ from .briefing_summarizer import MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Summariz
 _BASE_URL_ENV = "NEWS_SUBJECT_MODEL_BASE_URL"
 _MODEL_ENV = "NEWS_SUBJECT_MODEL"
 _API_KEY_ENV = "NEWS_SUBJECT_MODEL_API_KEY"
-_TIMEOUT_SECONDS = 10.0
+
+# Transport timeout rule: ceil(measured p95 of successful calls * margin), clamped
+# to [min, max]. The model is a reasoning model; a fixed 10 s cut off ~half of
+# real calls (7 of 12 took >10 s) and each timeout silently became a fallback.
+# Measured 2026-10-08 from the production host, 12 sequential calls, one subject
+# shape: 11 ok, p50 10.38 s, p95 12.21 s, max 12.21 s, plus one stall that never
+# returned within a 90 s probe cap (a stall is not fixable by a longer timeout).
+# Margin 2.0 absorbs run-to-run variance (observed ok range 6.6-12.2 s) without
+# letting a stalled call hold the cron lock; 60 s is the ceiling for a cron job.
+_MEASURED_P95_SECONDS = 12.21
+_TIMEOUT_MARGIN = 2.0
+_TIMEOUT_MIN_SECONDS = 10.0
+_TIMEOUT_MAX_SECONDS = 60.0
+
+
+def timeout_from_p95(
+    p95_seconds: float,
+    *,
+    margin: float = _TIMEOUT_MARGIN,
+    minimum: float = _TIMEOUT_MIN_SECONDS,
+    maximum: float = _TIMEOUT_MAX_SECONDS,
+) -> float:
+    """Return ceil(p95 * margin) seconds, clamped to [minimum, maximum]."""
+    if not math.isfinite(p95_seconds) or p95_seconds <= 0:
+        raise ValueError("p95 must be a positive finite number of seconds")
+    return float(min(maximum, max(minimum, math.ceil(p95_seconds * margin))))
+
+
+_TIMEOUT_SECONDS = timeout_from_p95(_MEASURED_P95_SECONDS)
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
