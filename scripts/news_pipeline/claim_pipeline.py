@@ -162,11 +162,19 @@ def observation_from_source_item(row: Mapping[str, object]) -> ObservationContra
     )
 
 
+# Context tokens are sorted, so digits sort first and must not become a subject.
+_NUMERIC_CONTEXT_TOKEN = re.compile(r"\d+")
+
+
 def _fact_fields(fact: TypedFact) -> tuple[str, str, str]:
     predicate = {FactKind.DATE: "has_date", FactKind.VERSION: "has_version",
                  FactKind.PRICE: "has_price", FactKind.PERCENT: "has_percentage",
                  FactKind.COUNT: "has_count"}[fact.kind]
-    return (fact.context[0] if fact.context else "source item", predicate, fact.value_normalized)
+    subject = next(
+        (token for token in fact.context if not _NUMERIC_CONTEXT_TOKEN.fullmatch(token)),
+        "source item",
+    )
+    return (subject, predicate, fact.value_normalized)
 
 
 def _first_party_mkinitcpio_fact(
