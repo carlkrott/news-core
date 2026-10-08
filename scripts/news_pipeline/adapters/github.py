@@ -1,4 +1,4 @@
-"""Single-release adapter for the first-party ggml-org/llama.cpp API source."""
+"""Single-release adapter for explicitly allowlisted first-party GitHub repositories."""
 from __future__ import annotations
 
 import hashlib
@@ -20,7 +20,24 @@ from .base import (
 )
 
 LATEST_RELEASE_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
-_RELEASE_PAGE_PREFIX = "/ggml-org/llama.cpp/releases/tag/"
+LATEST_RELEASE_APIS = {
+    "ggml-org/llama.cpp": LATEST_RELEASE_API,
+    "anthropics/claude-code": "https://api.github.com/repos/anthropics/claude-code/releases/latest",
+}
+RELEASE_SOURCE_CONTRACTS = {
+    "github-llamacpp-release": {
+        "endpoint": LATEST_RELEASE_APIS["ggml-org/llama.cpp"],
+        "category": "our_setup",
+        "publisher": "llama.cpp",
+        "page_prefix": "/ggml-org/llama.cpp/releases/tag/",
+    },
+    "github-anthropic-claude-code-release": {
+        "endpoint": LATEST_RELEASE_APIS["anthropics/claude-code"],
+        "category": "ai",
+        "publisher": "Anthropic",
+        "page_prefix": "/anthropics/claude-code/releases/tag/",
+    },
+}
 
 
 class GitHubReleaseAdapter(Adapter):
@@ -39,16 +56,20 @@ class GitHubReleaseAdapter(Adapter):
         schedule=None,
         transport: Transport | None = None,
     ) -> None:
-        if isinstance(source_id, SourceContract):
-            if (
-                source_id.adapter_type is not SourceAdapter.GITHUB
-                or source_id.host != "api.github.com"
-                or source_id.source_role is not SourceRole.DISCOVERY
-                or source_id.category_scope != ("our_setup",)
-                or len(source_id.queries) != 1
-                or source_id.queries[0].text != LATEST_RELEASE_API
-            ):
-                raise ValueError("GitHub release adapter only admits the bounded llama.cpp latest-release source")
+        source = source_id if isinstance(source_id, SourceContract) else None
+        source_key = source.source_id if source is not None else str(source_id)
+        release = RELEASE_SOURCE_CONTRACTS.get(source_key)
+        if release is None:
+            raise ValueError("GitHub release adapter source is not explicitly allowlisted")
+        if source is not None and (
+            source.adapter_type is not SourceAdapter.GITHUB
+            or source.host != "api.github.com"
+            or source.source_role is not SourceRole.DISCOVERY
+            or source.category_scope != (release["category"],)
+            or len(source.queries) != 1
+            or source.queries[0].text != release["endpoint"]
+        ):
+            raise ValueError("GitHub release source does not match its exact allowlisted repository contract")
         super().__init__(
             source_id,
             host,
@@ -67,8 +88,9 @@ class GitHubReleaseAdapter(Adapter):
         last_modified: str | None = None,
     ) -> FetchResult:
         url = endpoint.text if isinstance(endpoint, QuerySeed) else endpoint
-        if url != LATEST_RELEASE_API:
-            raise ValueError("GitHub release request must use the admitted HTTPS API endpoint")
+        release = RELEASE_SOURCE_CONTRACTS[self.source_id]
+        if url != release["endpoint"]:
+            raise ValueError("GitHub release request must use the source's exact admitted HTTPS API endpoint")
         return await self.fetch(
             url,
             retrieved_at=retrieved_at,
@@ -87,7 +109,8 @@ class GitHubReleaseAdapter(Adapter):
         url: str,
         retrieved_at: str,
     ) -> tuple[tuple[NormalizedItem, ...], tuple[ItemRejection, ...], AdapterError | None]:
-        if url != LATEST_RELEASE_API:
+        release = RELEASE_SOURCE_CONTRACTS[self.source_id]
+        if url != release["endpoint"]:
             return (), (), ParseError("GitHub release API response URL changed")
         try:
             value = json.loads(body_bytes)
@@ -117,7 +140,7 @@ class GitHubReleaseAdapter(Adapter):
             return (), (ItemRejection(0, "NON_STABLE_RELEASE", "latest release is draft or prerelease"),), None
 
         parsed = urlsplit(html_url)
-        tag_path = parsed.path.removeprefix(_RELEASE_PAGE_PREFIX)
+        tag_path = parsed.path.removeprefix(release["page_prefix"])
         if (
             parsed.scheme != "https"
             or parsed.hostname != "github.com"
@@ -125,11 +148,11 @@ class GitHubReleaseAdapter(Adapter):
             or parsed.password is not None
             or parsed.query
             or parsed.fragment
-            or not parsed.path.startswith(_RELEASE_PAGE_PREFIX)
+            or not parsed.path.startswith(release["page_prefix"])
             or not tag_path
             or unquote(tag_path) != tag
         ):
-            return (), (), ParseError("release canonical URL is outside ggml-org/llama.cpp")
+            return (), (), ParseError(f"release canonical URL is outside the allowlisted repository for {self.source_id}")
         try:
             canonical_url = canonicalize_url(html_url)
         except ValueError:
@@ -175,7 +198,7 @@ class GitHubReleaseAdapter(Adapter):
                 category=self.category,
                 original_url=canonical_url,
                 canonical_url=canonical_url,
-                publisher="llama.cpp",
+                publisher=release["publisher"],
                 source_role=self.source_role,
                 retrieval_method="github-release-api",
                 raw_content_hash=body_hash,

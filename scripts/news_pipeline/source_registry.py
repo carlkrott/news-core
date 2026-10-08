@@ -11,6 +11,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
+from .adapters.github import RELEASE_SOURCE_CONTRACTS
 from .live_contracts import (
     CATEGORY_VALUES,
     REPORT_SCOPE_VALUES,
@@ -325,14 +326,17 @@ def _parse_sources(raw: Mapping[str, Any]) -> tuple[SourceContract, ...]:
                     f"sources[{index}] RSS query must be an HTTP(S) URL on its configured host"
                 )
         elif adapter is SourceAdapter.GITHUB:
+            github_contract = RELEASE_SOURCE_CONTRACTS.get(entry["source_id"])
             if (
-                host != "api.github.com"
+                github_contract is None
+                or role is not SourceRole.DISCOVERY
+                or host != "api.github.com"
                 or len(queries) != 1
-                or queries[0].text != "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
-                or category_scope != ("our_setup",)
+                or queries[0].text != github_contract["endpoint"]
+                or category_scope != (github_contract["category"],)
             ):
                 raise ValueError(
-                    f"sources[{index}] GitHub adapter is limited to the official llama.cpp latest-release API in our_setup"
+                    f"sources[{index}] GitHub adapter must exactly match an explicitly allowlisted repository release endpoint"
                 )
         result.append(SourceContract(
             source_id=entry["source_id"], adapter_type=adapter, source_role=role, host=host,

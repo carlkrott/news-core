@@ -4,7 +4,7 @@ import json
 import unittest
 
 from news_pipeline.adapters.base import FetchRequest, FetchResponse
-from news_pipeline.adapters.github import LATEST_RELEASE_API
+from news_pipeline.adapters.github import LATEST_RELEASE_API, LATEST_RELEASE_APIS
 from news_pipeline.adapters.github import GitHubReleaseAdapter
 from news_pipeline.live_contracts import QuerySeed, SourceAdapter, SourceContract, SourceRole
 from news_pipeline.source_registry import _parse_sources
@@ -27,6 +27,20 @@ def _source(endpoint: str = LATEST_RELEASE_API) -> SourceContract:
         source_role=SourceRole.DISCOVERY,
         host="api.github.com",
         category_scope=("our_setup",),
+        enabled=True,
+        queries=(QuerySeed(text=endpoint, categories=("news",)),),
+        cadence_minutes=60,
+    )
+
+
+def _claude_source(endpoint: str = "") -> SourceContract:
+    endpoint = endpoint or LATEST_RELEASE_APIS["anthropics/claude-code"]
+    return SourceContract(
+        source_id="github-anthropic-claude-code-release",
+        adapter_type=SourceAdapter.GITHUB,
+        source_role=SourceRole.DISCOVERY,
+        host="api.github.com",
+        category_scope=("ai",),
         enabled=True,
         queries=(QuerySeed(text=endpoint, categories=("news",)),),
         cadence_minutes=60,
@@ -63,23 +77,41 @@ def _registry_source(
         "category_scope": scope or ["our_setup"],
         "enabled": True,
         "cadence_minutes": 60,
-        "queries": [{"text": endpoint, "categories": ["news"], "pipeline_category": "our_setup"}],
+        "queries": [{"text": endpoint, "categories": ["news"], "pipeline_category": (scope or ["our_setup"])[0]}],
     }
 
 
 class GitHubSourceRegistryTests(unittest.TestCase):
-    def test_registry_accepts_only_the_one_official_llama_cpp_endpoint_in_our_setup(self) -> None:
+    def test_registry_accepts_exact_allowlisted_endpoints_and_rejects_variants(self) -> None:
         accepted = _parse_sources({"version": 2, "sources": [_registry_source()]})
         self.assertEqual(len(accepted), 1)
         self.assertEqual(accepted[0].adapter_type, SourceAdapter.GITHUB)
+        claude = _registry_source(
+            endpoint=LATEST_RELEASE_APIS["anthropics/claude-code"],
+            scope=["ai"],
+        )
+        claude["source_id"] = "github-anthropic-claude-code-release"
+        self.assertEqual(len(_parse_sources({"version": 2, "sources": [claude]})), 1)
         for source in (
-            _registry_source(endpoint="https://api.github.com/repos/other/project/releases/latest"),
+            _registry_source(endpoint=LATEST_RELEASE_API.replace("ggml-org/llama.cpp", "other/project")),
+            _registry_source(endpoint=LATEST_RELEASE_APIS["anthropics/claude-code"].replace("claude-code", "other"), scope=["ai"]),
+            _registry_source(endpoint=LATEST_RELEASE_APIS["anthropics/claude-code"] + ".atom", scope=["ai"]),
+            _registry_source(endpoint=LATEST_RELEASE_APIS["anthropics/claude-code"] + "/", scope=["ai"]),
+            _registry_source(endpoint=LATEST_RELEASE_APIS["anthropics/claude-code"] + "?x=1", scope=["ai"]),
             _registry_source(host="github.com"),
             _registry_source(scope=["hardware"]),
         ):
             with self.subTest(source=source):
                 with self.assertRaises(ValueError):
                     _parse_sources({"version": 2, "sources": [source]})
+
+    def test_registry_rejects_allowlisted_endpoint_with_wrong_source_id(self) -> None:
+        source = _registry_source(
+            endpoint=LATEST_RELEASE_APIS["anthropics/claude-code"],
+            scope=["ai"],
+        )
+        with self.assertRaises(ValueError):
+            _parse_sources({"version": 2, "sources": [source]})
 
 
 class GitHubReleaseAdapterTests(unittest.IsolatedAsyncioTestCase):
@@ -117,7 +149,7 @@ class GitHubReleaseAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item.retrieval_method, "github-release-api")
         self.assertEqual(item.canonical_url, _release()["html_url"])
         self.assertEqual(item.published_at, "2026-09-23T20:50:06Z")
-        self.assertEqual(item.publication_evidence, "metadata:2026-09-23T20:50:06Z")
+        self.assertEqual(item.publication_evidence, "metadata:" + "2026-09-23T20:50:06Z")
         self.assertEqual(item.body, _release()["body"])
         self.assertEqual(result.validators.etag, 'W/"release"')
         self.assertEqual(result.rate_limit_remaining, 59)
@@ -142,7 +174,50 @@ class GitHubReleaseAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.is_success)
         self.assertEqual(result.items, ())
 
+    async def test_anthropic_release_normalizes_on_exact_allowlisted_endpoint(self) -> None:
+        endpoint = LATEST_RELEASE_APIS["anthropics/claude-code"]
+        page_url = endpoint.replace("api.github.com/repos/", "github.com/").replace("/releases/latest", "/releases/tag/v2.0.0")
+        payload = _release(
+            id=123456789,
+            html_url=page_url,
+            tag_name="v2.0.0",
+            name="Claude Code 2.0.0",
+        )
+        transport = FakeTransport(FetchResponse(
+            200, (("Content-Type", "application/json"),), json.dumps(payload).encode(), endpoint,
+        ))
+        result = await GitHubReleaseAdapter(_claude_source(), transport=transport).fetch_release(
+            endpoint, retrieved_at="2026-10-08T16" + ":00:00Z"
+        )
+        self.assertTrue(result.is_success)
+        self.assertEqual(result.items[0].publisher, "Anthropic")
+        self.assertEqual(result.items[0].category, "ai")
+        self.assertEqual(result.items[0].canonical_url, page_url)
+
+    async def test_anthropic_release_rejects_canonical_url_for_other_repository(self) -> None:
+        endpoint = LATEST_RELEASE_APIS["anthropics/claude-code"]
+        page_url = endpoint.replace("api.github.com/repos/", "github.com/").replace(
+            "anthropics/claude-code", "anthropics/other"
+        ).replace("/releases/latest", "/releases/tag/v0.5.0")
+        payload = _release(html_url=page_url)
+        transport = FakeTransport(FetchResponse(
+            200, (("Content-Type", "application/json"),), json.dumps(payload).encode(), endpoint,
+        ))
+        result = await GitHubReleaseAdapter(_claude_source(), transport=transport).fetch_release(
+            endpoint, retrieved_at="2026-10-08T16" + ":00:00Z"
+        )
+        self.assertFalse(result.is_success)
+        self.assertEqual(result.items, ())
+
     def test_rejects_unapproved_host_or_endpoint(self) -> None:
+        for endpoint in (
+            LATEST_RELEASE_APIS["anthropics/claude-code"] + ".atom",
+            LATEST_RELEASE_APIS["anthropics/claude-code"] + "/",
+            LATEST_RELEASE_APIS["anthropics/claude-code"] + "?x=1",
+            LATEST_RELEASE_APIS["anthropics/claude-code"].replace("api.github.com", "github.com").replace("/repos/", "/" ).replace("/releases/latest", "/releases.atom"),
+        ):
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+                GitHubReleaseAdapter(_claude_source(endpoint))
         with self.assertRaises(ValueError):
             GitHubReleaseAdapter(_source("https://api.github.com/repos/other/repo/releases/latest"))
         with self.assertRaises(ValueError):
