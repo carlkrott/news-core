@@ -23,6 +23,22 @@ class ClaimPipelineTests(unittest.TestCase):
             title="Product v2.0 launched", body="Product v2.0 launched on 2026-09-06 for $10.",
         )
 
+    def test_numeric_title_token_is_never_the_claim_subject(self):
+        observation = replace(
+            self.observation(),
+            title="Widgetd v3.1 released with 0 regressions",
+            body="Widgetd v3.1 released with 0 regressions.",
+        )
+        subjects = {claim.subject for claim in claims_from_observation(observation).claims}
+        self.assertTrue(subjects)
+        self.assertNotIn("0", subjects)
+        self.assertEqual(subjects, {"regressions"})
+
+    def test_all_numeric_title_falls_back_to_source_item_subject(self):
+        observation = replace(self.observation(), title="0 1 2", body="Version v2.0 shipped.")
+        subjects = {claim.subject for claim in claims_from_observation(observation).claims}
+        self.assertEqual(subjects, {"source item"})
+
     def test_claims_are_deterministic_and_exactly_hashed(self):
         first = claims_from_observation(self.observation())
         second = claims_from_observation(self.observation())
