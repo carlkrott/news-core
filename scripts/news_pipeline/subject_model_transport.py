@@ -80,7 +80,10 @@ def configured_transport(
                             "source_url, and fact_deltas. Copy subject, event_id, "
                             "event_version, source_url (exactly the first source_urls value), "
                             "and fact_deltas from the matching input; do not add facts or "
-                            "URLs. Do not use markdown."
+                            "URLs. You must write what_changed and why_it_matters yourself: "
+                            "each is a non-empty string of 1 to 256 characters of plain text, "
+                            "one sentence, based only on the item's title and fact_deltas, "
+                            "with no URLs; never null, never empty. Do not use markdown."
                         ),
                     },
                     {"role": "user", "content": request_bytes.decode("utf-8")},
