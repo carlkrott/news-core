@@ -136,6 +136,69 @@ class SubjectModelTransportTests(unittest.TestCase):
         self.assertEqual(response.read_limit, 32769)
         self.assertTrue(response.closed)
 
+    @staticmethod
+    def _one_input() -> SubjectEditorialInput:
+        return SubjectEditorialInput(
+            subject=Subject.PROFESSIONAL_AV,
+            event_id="event-1",
+            event_version=1,
+            title="A verified event",
+            fact_deltas=(),
+            source_urls=("https://example.test/a",),
+            policy=subject_policy(Subject.PROFESSIONAL_AV),
+        )
+
+    def test_prompt_requires_model_to_write_nonempty_prose_fields(self) -> None:
+        """Live replies had valid JSON with null what_changed/why_it_matters."""
+        captured: list[urllib.request.Request] = []
+
+        def opener(request: urllib.request.Request, *, timeout: float) -> _Response:
+            captured.append(request)
+            return _Response(
+                json.dumps({"choices": [{"message": {"content": '{"items": []}'}}]}).encode()
+            )
+
+        transport = configured_transport(
+            environ={
+                "NEWS_SUBJECT_MODEL_BASE_URL": "http://model.example.test/v1",
+                "NEWS_SUBJECT_MODEL": "approved-model",
+            },
+            opener=opener,
+        )
+        transport(b'{"items":[]}')
+
+        system = json.loads(captured[0].data)["messages"][0]["content"]
+        for field in ("what_changed", "why_it_matters"):
+            self.assertIn(field, system)
+        self.assertIn("non-empty string", system)
+        self.assertIn("never null", system)
+        self.assertIn("256", system)
+
+    def test_null_prose_reply_stays_malformed_output_fallback(self) -> None:
+        """Validation is not loosened: null prose is malformed, not accepted."""
+        input_item = self._one_input()
+        content = json.dumps(
+            {
+                "items": [
+                    {
+                        "subject": Subject.PROFESSIONAL_AV.value,
+                        "event_id": input_item.event_id,
+                        "event_version": input_item.event_version,
+                        "what_changed": None,
+                        "why_it_matters": None,
+                        "source_url": input_item.source_urls[0],
+                        "fact_deltas": [],
+                    }
+                ]
+            }
+        )
+        summarizer = SummarizerSession(lambda _request: content.encode())
+        result = summarizer.summarize_subject(Subject.PROFESSIONAL_AV, (input_item,))
+
+        self.assertEqual(len(result.items), 1)
+        self.assertIs(result.items[0].source, SummarySource.FALLBACK)
+        self.assertIs(result.items[0].error_category, SummarizerErrorCategory.MALFORMED_OUTPUT)
+
     def test_missing_configuration_keeps_exact_deterministic_fallback_without_io(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
             summarizer = report_builder._default_subject_summarizer()
