@@ -68,6 +68,32 @@ class RegistryRejectionTests(unittest.TestCase):
                 (root / name).write_text(value, encoding="utf-8")
             load_registry(root / "news-sources.toml", root / "news-topics.toml", root / "news-policy.toml")
 
+    def test_rss_source_response_limit_override_loads_and_stays_bounded(self) -> None:
+        text = SOURCES.read_text(encoding="utf-8").replace(
+            'source_id = "example-feed-ai"',
+            'source_id = "example-feed-ai"\nmax_response_bytes = 1048576',
+            1,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, value in {
+                "news-sources.toml": text,
+                "news-topics.toml": TOPICS.read_text(encoding="utf-8"),
+                "news-policy.toml": POLICY.read_text(encoding="utf-8"),
+            }.items():
+                (root / name).write_text(value, encoding="utf-8")
+            config = load_registry(root / "news-sources.toml", root / "news-topics.toml", root / "news-policy.toml")
+        self.assertEqual(config.sources_by_id["example-feed-ai"].max_response_bytes, 1048576)
+
+    def test_rss_source_response_limit_override_above_hard_cap_rejected(self) -> None:
+        text = SOURCES.read_text(encoding="utf-8").replace(
+            'source_id = "example-feed-ai"',
+            'source_id = "example-feed-ai"\nmax_response_bytes = 2097153',
+            1,
+        )
+        with self.assertRaises(ValueError):
+            self._load_changed(sources=text)
+
     def test_unknown_source_key_rejected(self) -> None:
         text = SOURCES.read_text(encoding="utf-8").replace("enabled = true", "enabled = true\nunknown = 1", 1)
         with self.assertRaises(ValueError):

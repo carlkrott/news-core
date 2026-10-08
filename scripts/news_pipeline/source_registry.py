@@ -25,7 +25,7 @@ from .models import Subject, subject_for_category
 
 _SOURCE_TOP_KEYS = frozenset({"version", "sources"})
 _SOURCE_REQUIRED = frozenset({"source_id", "adapter_type", "source_role", "host", "category_scope", "enabled", "queries"})
-_SOURCE_OPTIONAL = frozenset({"title_blocklist", "content_blocklist", "url_blocklist", "allowlist_domains", "cadence_minutes", "terms_notes", "rate_limit_notes", "next_due_at"})
+_SOURCE_OPTIONAL = frozenset({"title_blocklist", "content_blocklist", "url_blocklist", "allowlist_domains", "cadence_minutes", "terms_notes", "rate_limit_notes", "next_due_at", "max_response_bytes"})
 _QUERY_REQUIRED = frozenset({"text", "categories"})
 _QUERY_OPTIONAL = frozenset({"pipeline_category", "feed_lane_id"})
 _TOPIC_TOP_KEYS = frozenset({"version", "topics"})
@@ -344,6 +344,7 @@ def _parse_sources(raw: Mapping[str, Any]) -> tuple[SourceContract, ...]:
             allowlist_domains=_string_tuple("allowlist_domains", entry.get("allowlist_domains", [])),
             cadence_minutes=entry.get("cadence_minutes"), terms_notes=entry.get("terms_notes"),
             rate_limit_notes=entry.get("rate_limit_notes"), next_due_at=entry.get("next_due_at"),
+            max_response_bytes=entry.get("max_response_bytes"),
         ))
     if len({source.source_id for source in result}) != len(result):
         raise ValueError("duplicate source_id")

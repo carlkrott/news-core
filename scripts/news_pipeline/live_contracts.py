@@ -304,6 +304,7 @@ class SourceContract:
     terms_notes: str | None = None
     rate_limit_notes: str | None = None
     next_due_at: str | None = None
+    max_response_bytes: int | None = None
 
     def __post_init__(self) -> None:
         _text("source_id", self.source_id)
@@ -358,6 +359,12 @@ class SourceContract:
         _text("terms_notes", self.terms_notes, optional=True)
         _text("rate_limit_notes", self.rate_limit_notes, optional=True)
         _timestamp("next_due_at", self.next_due_at, optional=True)
+        _integer("max_response_bytes", self.max_response_bytes, minimum=1, optional=True)
+        if self.max_response_bytes is not None:
+            if self.adapter_type is not SourceAdapter.RSS:
+                raise ValueError("max_response_bytes override is supported only for RSS feeds")
+            if self.max_response_bytes > 2 * 1024 * 1024:
+                raise ValueError("RSS max_response_bytes cannot exceed 2 MiB")
 
 
 @dataclass(frozen=True, slots=True)
