@@ -79,7 +79,7 @@ class RssAdapter(Adapter):
                 ),
                 (
                     "User-Agent",
-                    "news-pipeline/2.0 (RSS reader)",
+                    "news-core/2.0 (RSS reader)",
                 ),
             ),
             validators=FetchValidators(etag=etag, last_modified=last_modified),

@@ -663,8 +663,10 @@ class TestRssParseItems(unittest.IsolatedAsyncioTestCase):
         await adapter.fetch_feed("https://example.com/feed.xml", retrieved_at=RETRIEVED_AT)
         request = transport.requests[0]
         headers = dict(request.headers)
-        self.assertIn("news-pipeline/2.0", headers["User-Agent"])
-        self.assertIn("RSS reader", headers["User-Agent"])
+        self.assertEqual(
+            headers["User-Agent"],
+            "news-core/2.0 (RSS reader)",
+        )
         self.assertEqual(request.max_response_bytes, 512 * 1024)
 
     async def test_source_specific_feed_limit_accepts_nvidia_sized_response(self) -> None:
