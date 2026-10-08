@@ -479,10 +479,13 @@ def _has_verified_claims_and_provenance(
                           cp.independence_group,cp.authority_match,cp.matched_rule_id,
                           cp.normalized_publisher_host,cp.authority_scope_json,
                           cp.authority_entities_json,si.category,si.canonical_url,
-                          ce.excerpt_hash,si.raw_content_hash
+                          ce.excerpt_hash,si.raw_content_hash,pr.enabled,
+                           pr.effective_source_role,pr.independence_group,pr.normalized_host,
+                           pr.category_scope_json
                           FROM claim_evidence ce
-                     LEFT JOIN claim_evidence_provenance cp ON cp.evidence_id=ce.evidence_id
-                     JOIN source_items si ON si.source_item_id=ce.source_item_id
+                          LEFT JOIN claim_evidence_provenance cp ON cp.evidence_id=ce.evidence_id
+                          LEFT JOIN publisher_registry pr ON pr.rule_id=cp.matched_rule_id
+                          JOIN source_items si ON si.source_item_id=ce.source_item_id
                     WHERE ce.claim_id=? ORDER BY ce.evidence_id""",
                 (claim_id,),
             ).fetchall()
@@ -493,7 +496,13 @@ def _has_verified_claims_and_provenance(
                 return False
             claim_evidence = []
             for row in evidence_rows:
-                adapted = claim_specific_evidence_row(row[:9], str(claim_subject))
+                adapted = claim_specific_evidence_row(
+                    row[:9],
+                    str(claim_subject),
+                    registry_enabled=len(row) > 16 and row[12] == 1,
+                    registry_role=row[13], registry_group=row[14],
+                    registry_host=row[15], registry_categories=row[16],
+                )
                 adapted["canonical_url"] = row[9]
                 adapted["text_hash"] = row[10]
                 adapted["raw_content_hash"] = row[11]
@@ -583,6 +592,82 @@ def _items_from_links(con: sqlite3.Connection, report_id: str) -> list[tuple[str
     return checked
 
 
+def _highest_source_tier(sources: Sequence[tuple[str, str]]) -> tuple[str, str] | None:
+    ranked = {
+        "primary": (0, "primary"),
+        "specialist": (1, "trade/specialist"),
+        "neutral": (2, "generic news (lowest tier)"),
+    }
+    eligible = [(ranked[role][0], ranked[role][1], host) for role, host in sources if role in ranked and host]
+    if not eligible:
+        return None
+    _rank, tier, host = min(eligible)
+    return tier, host
+
+
+def _event_source_provenance(
+    con: sqlite3.Connection, event_id: str, version: int
+) -> dict[str, Any]:
+    """Summarize verified registry evidence without exposing article bodies."""
+    if not _has_schema_v11(con):
+        return {"verification_basis": "strict", "source_tier": "unknown", "outlet": None}
+    claim_rows = con.execute(
+        """SELECT DISTINCT c.claim_id,c.subject,c.status
+             FROM event_claims ec JOIN claims c ON c.claim_id=ec.claim_id
+            WHERE ec.event_id=? AND ec.event_version=? ORDER BY c.claim_id""",
+        (event_id, version),
+    ).fetchall()
+    sources: list[tuple[str, str]] = []
+    registry_groups: set[str] = set()
+    has_primary_authority = False
+    for claim_id, subject, _status in claim_rows:
+        rows = con.execute(
+            """SELECT ce.evidence_role,cp.effective_source_role,cp.independence_group,
+                      cp.authority_match,cp.matched_rule_id,cp.normalized_publisher_host,
+                      cp.authority_scope_json,cp.authority_entities_json,si.category,
+                      si.canonical_url,ce.excerpt_hash,si.raw_content_hash,pr.enabled,
+                          pr.effective_source_role,pr.independence_group,pr.normalized_host,
+                          pr.category_scope_json
+                 FROM claim_evidence ce
+                 LEFT JOIN claim_evidence_provenance cp ON cp.evidence_id=ce.evidence_id
+                 LEFT JOIN publisher_registry pr ON pr.rule_id=cp.matched_rule_id
+                 JOIN source_items si ON si.source_item_id=ce.source_item_id
+                WHERE ce.claim_id=? ORDER BY ce.evidence_id""",
+            (claim_id,),
+        ).fetchall()
+        evidence = []
+        for row in rows:
+            item = claim_specific_evidence_row(
+                row[:9],
+                str(subject),
+                registry_enabled=len(row) > 16 and row[12] == 1,
+                registry_role=row[13], registry_group=row[14],
+                registry_host=row[15], registry_categories=row[16],
+            )
+            item.update(canonical_url=row[9], text_hash=row[10], raw_content_hash=row[11])
+            evidence.append(item)
+            if item.get("role") == "supports" and item.get("registry_matched") is True:
+                group = item.get("independence_group")
+                if type(group) is str and group:
+                    registry_groups.add(group)
+                if item.get("effective_source_role") == "primary" and item.get("authority_match") is True:
+                    has_primary_authority = True
+                role = str(item.get("effective_source_role") or "")
+                host = row[5] if type(row[5]) is str else ""
+                if role in {"primary", "specialist", "neutral"} and host:
+                    sources.append((role, host))
+    single_outlet = len(registry_groups) == 1 and not has_primary_authority
+    highest = _highest_source_tier(sources)
+    if highest is None:
+        return {"verification_basis": "single outlet" if single_outlet else "strict", "source_tier": "unknown", "outlet": None}
+    tier, host = highest
+    return {
+        "verification_basis": "single outlet" if single_outlet else "multi-source",
+        "source_tier": tier,
+        "outlet": host,
+    }
+
+
 def _item_dict(con: sqlite3.Connection, row: tuple[str, int, str, str, str, str]) -> dict[str, Any]:
     event_id, version, summary, category, valid_from, change_reason = _validated_event_row(row)
     source_urls = tuple(row[0] for row in con.execute("""
@@ -611,6 +696,7 @@ def _item_dict(con: sqlite3.Connection, row: tuple[str, int, str, str, str, str]
             else SemanticReasonCode.NUMERIC_REVISION.value
         )
     )
+    source_provenance = _event_source_provenance(con, event_id, version)
     return {
         "event_id": event_id,
         "event_version": version,
@@ -626,6 +712,7 @@ def _item_dict(con: sqlite3.Connection, row: tuple[str, int, str, str, str, str]
         "material_change_reason": change_reason,
         "verification": "verified",
         "semantic_reasons": [semantic_reason],
+        **source_provenance,
     }
 
 

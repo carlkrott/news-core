@@ -232,10 +232,13 @@ def _claim_verification_state(
             """SELECT ce.evidence_role,cp.effective_source_role,cp.independence_group,
                       cp.authority_match,cp.matched_rule_id,cp.normalized_publisher_host,
                       cp.authority_scope_json,cp.authority_entities_json,si.category,
-                      si.canonical_url,ce.excerpt_hash,si.raw_content_hash
+                      si.canonical_url,ce.excerpt_hash,si.raw_content_hash,pr.enabled,
+                      pr.effective_source_role,pr.independence_group,pr.normalized_host,
+                      pr.category_scope_json
                  FROM claim_evidence ce
                  JOIN source_items si ON si.source_item_id=ce.source_item_id
                  LEFT JOIN claim_evidence_provenance cp ON cp.evidence_id=ce.evidence_id
+                 LEFT JOIN publisher_registry pr ON pr.rule_id=cp.matched_rule_id
                 WHERE ce.claim_id=? ORDER BY ce.evidence_id""",
             (claim_id,),
         ).fetchall()
@@ -666,7 +669,15 @@ def _v7_evidence_row(row: tuple, claim_subject: str) -> dict[str, object]:
 
 
 def _v11_evidence_row(row: tuple, claim_subject: str) -> dict[str, object]:
-    evidence = claim_specific_evidence_row(row[:9], claim_subject)
+    evidence = claim_specific_evidence_row(
+        row[:9],
+        claim_subject,
+        registry_enabled=len(row) > 16 and row[12] == 1,
+        registry_role=row[13] if len(row) > 13 else None,
+        registry_group=row[14] if len(row) > 14 else None,
+        registry_host=row[15] if len(row) > 15 else None,
+        registry_categories=row[16] if len(row) > 16 else None,
+    )
     if len(row) >= 12:
         evidence["canonical_url"] = row[9]
         evidence["text_hash"] = row[10]
@@ -693,10 +704,13 @@ def _v11_claims_are_verified(
             """SELECT ce.evidence_role,cp.effective_source_role,cp.independence_group,
                       cp.authority_match,cp.matched_rule_id,cp.normalized_publisher_host,
                       cp.authority_scope_json,cp.authority_entities_json,si.category,
-                      si.canonical_url,ce.excerpt_hash,si.raw_content_hash
+                      si.canonical_url,ce.excerpt_hash,si.raw_content_hash,pr.enabled,
+                      pr.effective_source_role,pr.independence_group,pr.normalized_host,
+                      pr.category_scope_json
                  FROM claim_evidence ce
                  JOIN source_items si ON si.source_item_id=ce.source_item_id
                  LEFT JOIN claim_evidence_provenance cp ON cp.evidence_id=ce.evidence_id
+                 LEFT JOIN publisher_registry pr ON pr.rule_id=cp.matched_rule_id
                 WHERE ce.claim_id=? ORDER BY ce.evidence_id""",
             (claim_id,),
         ).fetchall()
@@ -961,9 +975,12 @@ def process_phase4(db_path: str | Path, evaluated_at: str, *, max_items: int = 1
                         cp.effective_source_role,cp.independence_group,cp.authority_match,
                         cp.matched_rule_id,cp.normalized_publisher_host,
                         cp.authority_scope_json,cp.authority_entities_json,si.category,
-                        si.canonical_url,ce.excerpt_hash,si.raw_content_hash
+                        si.canonical_url,ce.excerpt_hash,si.raw_content_hash,pr.enabled,
+                      pr.effective_source_role,pr.independence_group,pr.normalized_host,
+                      pr.category_scope_json
                         FROM claim_evidence ce
                         LEFT JOIN claim_evidence_provenance cp ON cp.evidence_id=ce.evidence_id
+                        LEFT JOIN publisher_registry pr ON pr.rule_id=cp.matched_rule_id
                         JOIN source_items si ON si.source_item_id=ce.source_item_id
                         WHERE ce.claim_id IN (%s) ORDER BY ce.evidence_id""" % ",".join("?" for _ in ids), ids).fetchall()
                     state = verify_evidence(

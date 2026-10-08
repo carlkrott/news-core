@@ -118,6 +118,17 @@ migration against live state, schedule change, or service operation.  The
 target directory must be empty, and every delivery-attempt count must remain
 zero.
 
+## Claim verification policy
+
+Enabled publisher-registry provenance may verify a claim from one approved outlet;
+report items identify that path as `single outlet`. Switch back to the prior
+primary-authority / two-independent-group policy by setting
+`NEWS_SINGLE_OUTLET_ENABLED=0` in the news worker environment. The switch is
+on-equivalent by default. Report provenance names the highest available tier:
+primary, trade/specialist, then generic/neutral (the lowest tier until a
+separate generic-news role exists). Registry contents and delivery settings are
+not changed by this policy.
+
 ## Quick start (portable, no live delivery)
 
 ```bash
