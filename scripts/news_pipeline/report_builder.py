@@ -478,8 +478,9 @@ def _has_verified_claims_and_provenance(
                 """SELECT ce.evidence_role,cp.effective_source_role,
                           cp.independence_group,cp.authority_match,cp.matched_rule_id,
                           cp.normalized_publisher_host,cp.authority_scope_json,
-                          cp.authority_entities_json,si.category
-                     FROM claim_evidence ce
+                          cp.authority_entities_json,si.category,si.canonical_url,
+                          ce.excerpt_hash,si.raw_content_hash
+                          FROM claim_evidence ce
                      LEFT JOIN claim_evidence_provenance cp ON cp.evidence_id=ce.evidence_id
                      JOIN source_items si ON si.source_item_id=ce.source_item_id
                     WHERE ce.claim_id=? ORDER BY ce.evidence_id""",
@@ -490,10 +491,13 @@ def _has_verified_claims_and_provenance(
             ).fetchone()[0]
             if not evidence_rows or len(evidence_rows) != expected_count:
                 return False
-            claim_evidence = tuple(
-                claim_specific_evidence_row(row, str(claim_subject))
-                for row in evidence_rows
-            )
+            claim_evidence = []
+            for row in evidence_rows:
+                adapted = claim_specific_evidence_row(row[:9], str(claim_subject))
+                adapted["canonical_url"] = row[9]
+                adapted["text_hash"] = row[10]
+                adapted["raw_content_hash"] = row[11]
+                claim_evidence.append(adapted)
             if verify_evidence(claim_evidence) is not VerificationState.VERIFIED:
                 return False
             continue

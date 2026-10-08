@@ -140,9 +140,22 @@ def authority_entity_matches(subject: object, entities: object) -> bool:
 
 def verify_evidence(evidence: Iterable[Mapping[str, object]]) -> VerificationState:
     rows = tuple(evidence)
-    supports = []
     contradicts = []
-    for row in rows:
+    parents: dict[str, str] = {}
+
+    def find(key: str) -> str:
+        parents.setdefault(key, key)
+        if parents[key] != key:
+            parents[key] = find(parents[key])
+        return parents[key]
+
+    def union(left: str, right: str) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    candidates: list[tuple[dict[str, object], str]] = []
+    for index, row in enumerate(rows):
         role = _value(row.get("role"))
         source_role_key = "effective_source_role" if "effective_source_role" in row else "source_role"
         source_role = _value(row.get(source_role_key))
@@ -166,16 +179,31 @@ def verify_evidence(evidence: Iterable[Mapping[str, object]]) -> VerificationSta
         )
         if role == EvidenceRole.CONTRADICTS.value:
             contradicts.append(normalized)
-        elif role == EvidenceRole.SUPPORTS.value and source_role in {"primary", "neutral", "specialist"}:
-            if group and type(authority) is bool:
-                supports.append(normalized)
+            continue
+        if role != EvidenceRole.SUPPORTS.value or source_role not in {"primary", "neutral", "specialist"} or not group or type(authority) is not bool:
+            continue
+        # Publisher groups, canonical URLs, matching text and explicit wire
+        # parents all identify one underlying source of corroboration.
+        key = f"row:{index}"
+        find(key)
+        tokens = [f"group:{group}"]
+        for field in ("canonical_url", "text_hash", "raw_content_hash", "syndicated_parent", "wire_parent"):
+            value = row.get(field)
+            if isinstance(value, str) and value.strip():
+                tokens.append(f"{field}:{value.strip().casefold()}")
+        for token in tokens:
+            union(key, token)
+        candidates.append((normalized, key))
     if contradicts:
         return VerificationState.WATCHLIST
-    if any(row["effective_source_role"] == "primary" and row["authority_match"] is True for row in supports):
+    # A primary-authority match is an independent verification route and is
+    # deliberately evaluated before cross-outlet deduplication.
+    if any(row["effective_source_role"] == "primary" and row["authority_match"] is True for row, _ in candidates):
         return VerificationState.VERIFIED
-    groups = {row["independence_group"] for row in supports if row["independence_group"]}
-    roles = {row["effective_source_role"] for row in supports}
-    if len(groups) >= 2 and roles & {"neutral", "specialist"}:
+    components: dict[str, set[str]] = {}
+    for row, key in candidates:
+        components.setdefault(find(key), set()).add(_value(row.get("effective_source_role")))
+    if len(components) >= 2 and any(roles & {"neutral", "specialist"} for roles in components.values()):
         return VerificationState.VERIFIED
     return VerificationState.UNVERIFIED
 

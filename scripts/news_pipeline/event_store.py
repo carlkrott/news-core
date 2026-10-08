@@ -231,7 +231,8 @@ def _claim_verification_state(
         rows = connection.execute(
             """SELECT ce.evidence_role,cp.effective_source_role,cp.independence_group,
                       cp.authority_match,cp.matched_rule_id,cp.normalized_publisher_host,
-                      cp.authority_scope_json,cp.authority_entities_json,si.category
+                      cp.authority_scope_json,cp.authority_entities_json,si.category,
+                      si.canonical_url,ce.excerpt_hash,si.raw_content_hash
                  FROM claim_evidence ce
                  JOIN source_items si ON si.source_item_id=ce.source_item_id
                  LEFT JOIN claim_evidence_provenance cp ON cp.evidence_id=ce.evidence_id
@@ -243,7 +244,7 @@ def _claim_verification_state(
         ).fetchone()[0]
         if not rows or len(rows) != expected:
             return VerificationState.UNVERIFIED
-        evidence = tuple(claim_specific_evidence_row(row, subject) for row in rows)
+        evidence = tuple(_v11_evidence_row(row, subject) for row in rows)
     elif _has_schema_v7(connection):
         rows = connection.execute(
             """SELECT ce.evidence_role,sp.effective_source_role,sp.independence_group,
@@ -665,7 +666,12 @@ def _v7_evidence_row(row: tuple, claim_subject: str) -> dict[str, object]:
 
 
 def _v11_evidence_row(row: tuple, claim_subject: str) -> dict[str, object]:
-    return claim_specific_evidence_row(row, claim_subject)
+    evidence = claim_specific_evidence_row(row[:9], claim_subject)
+    if len(row) >= 12:
+        evidence["canonical_url"] = row[9]
+        evidence["text_hash"] = row[10]
+        evidence["raw_content_hash"] = row[11]
+    return evidence
 
 
 def _v11_claims_are_verified(
@@ -686,7 +692,8 @@ def _v11_claims_are_verified(
         rows = connection.execute(
             """SELECT ce.evidence_role,cp.effective_source_role,cp.independence_group,
                       cp.authority_match,cp.matched_rule_id,cp.normalized_publisher_host,
-                      cp.authority_scope_json,cp.authority_entities_json,si.category
+                      cp.authority_scope_json,cp.authority_entities_json,si.category,
+                      si.canonical_url,ce.excerpt_hash,si.raw_content_hash
                  FROM claim_evidence ce
                  JOIN source_items si ON si.source_item_id=ce.source_item_id
                  LEFT JOIN claim_evidence_provenance cp ON cp.evidence_id=ce.evidence_id
@@ -953,7 +960,8 @@ def process_phase4(db_path: str | Path, evaluated_at: str, *, max_items: int = 1
                     evidence_rows = connection.execute("""SELECT ce.evidence_role,
                         cp.effective_source_role,cp.independence_group,cp.authority_match,
                         cp.matched_rule_id,cp.normalized_publisher_host,
-                        cp.authority_scope_json,cp.authority_entities_json,si.category
+                        cp.authority_scope_json,cp.authority_entities_json,si.category,
+                        si.canonical_url,ce.excerpt_hash,si.raw_content_hash
                         FROM claim_evidence ce
                         LEFT JOIN claim_evidence_provenance cp ON cp.evidence_id=ce.evidence_id
                         JOIN source_items si ON si.source_item_id=ce.source_item_id
