@@ -32,6 +32,7 @@ class RssAdapter(Adapter):
 
     ACCEPTED_CONTENT_TYPES = ACCEPTED_FEED_TYPES
     MAX_ITEMS_PER_RESPONSE = 50
+    DEFAULT_MAX_RESPONSE_BYTES = 512 * 1024
 
     def __init__(
         self,
@@ -76,9 +77,17 @@ class RssAdapter(Adapter):
                     "application/rss+xml, application/atom+xml, "
                     "application/rdf+xml, application/xml, text/xml",
                 ),
-                ("User-Agent", "news-pipeline/2.0 (standard-library adapter)"),
+                (
+                    "User-Agent",
+                    "news-pipeline/2.0 (RSS reader)",
+                ),
             ),
             validators=FetchValidators(etag=etag, last_modified=last_modified),
+            max_response_bytes=(
+                self.source.max_response_bytes
+                if self.source is not None and self.source.max_response_bytes is not None
+                else self.DEFAULT_MAX_RESPONSE_BYTES
+            ),
         )
 
     def _parse(
