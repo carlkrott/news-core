@@ -387,11 +387,10 @@ class RegressionPersistenceTests(unittest.TestCase):
         self.assertEqual(exc_hash, hashlib.sha256(excerpt.encode()).hexdigest())
 
     def test_different_roles_produce_different_verification_outcomes(self):
-        """primary+authority_match=1 -> verified; specialist alone -> unverified;
-        discovery -> unverified; contradiction -> watchlist."""
+        """Enabled primary/specialist registry rows verify singly; discovery does not."""
         for item_id, role, ig, expected_state in [
             ("ev-primary", "primary", "openai-origin", VerificationState.VERIFIED),
-            ("ev-specialist", "specialist", "trade-press", VerificationState.UNVERIFIED),
+            ("ev-specialist", "specialist", "trade-press", VerificationState.VERIFIED),
             ("ev-discovery", "discovery", "search-index", VerificationState.UNVERIFIED),
         ]:
             with self.subTest(item_id=item_id, expected_state=expected_state):
@@ -403,7 +402,14 @@ class RegressionPersistenceTests(unittest.TestCase):
                     '["OpenAI"]',
                     "ai",
                 )
-                evidence = claim_specific_evidence_row(row, "OpenAI")
+                evidence = claim_specific_evidence_row(
+                    row, "OpenAI",
+                    registry_enabled=role in {"primary", "specialist"},
+                    registry_role=role if role in {"primary", "specialist"} else None,
+                    registry_group=ig if role in {"primary", "specialist"} else None,
+                    registry_host="example.test" if role in {"primary", "specialist"} else None,
+                    registry_categories='["ai"]' if role in {"primary", "specialist"} else None,
+                )
                 result = verify_evidence([evidence])
                 self.assertEqual(result, expected_state, f"{item_id}: expected {expected_state}, got {result}")
 

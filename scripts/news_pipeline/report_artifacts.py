@@ -151,6 +151,13 @@ def _markdown(payload: dict[str, Any]) -> bytes:
         lines.append("No verified new events in this reporting window.")
     for n, item in enumerate(items, 1):
         lines.extend([f"{n}. **{item.get('title') or 'Untitled'}**", f"   Decision: {item.get('decision', '')} | Verification: {item.get('verification', 'verified')}"])
+        if item.get("verification_basis") == "single outlet":
+            lines.append("   Verification basis: single outlet")
+        if item.get("source_tier") and item.get("source_tier") != "unknown":
+            source = f"   Highest source tier: {item['source_tier']}"
+            if item.get("outlet"):
+                source += f" ({item['outlet']})"
+            lines.append(source)
         if item.get("event_date"):
             lines.append(f"   Event date: {item['event_date']}")
         if item.get("summary"):

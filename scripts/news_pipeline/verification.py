@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -138,7 +139,31 @@ def authority_entity_matches(subject: object, entities: object) -> bool:
     )
 
 
-def verify_evidence(evidence: Iterable[Mapping[str, object]]) -> VerificationState:
+def _single_outlet_enabled() -> bool:
+    """Read the reversible operator switch; absent means approved B behavior."""
+    raw = os.environ.get("NEWS_SINGLE_OUTLET_ENABLED")
+    if raw is None:
+        return True
+    if raw.strip().casefold() in {"1", "true", "yes", "on"}:
+        return True
+    if raw.strip().casefold() in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError("NEWS_SINGLE_OUTLET_ENABLED must be a boolean")
+
+
+def verify_evidence(
+    evidence: Iterable[Mapping[str, object]], *, allow_single_outlet: bool | None = None
+) -> VerificationState:
+    """Verify by primary authority, independent corroboration, or approved single outlet.
+
+    Single-outlet eligibility requires complete persisted registry provenance. The
+    switch defaults on as authorized; set NEWS_SINGLE_OUTLET_ENABLED=0 to restore
+    the prior strict primary-authority / two-independent-group behavior.
+    """
+    if allow_single_outlet is None:
+        allow_single_outlet = _single_outlet_enabled()
+    if type(allow_single_outlet) is not bool:
+        raise TypeError("allow_single_outlet must be a boolean")
     rows = tuple(evidence)
     contradicts = []
     parents: dict[str, str] = {}
@@ -205,11 +230,22 @@ def verify_evidence(evidence: Iterable[Mapping[str, object]]) -> VerificationSta
         components.setdefault(find(key), set()).add(_value(row.get("effective_source_role")))
     if len(components) >= 2 and any(roles & {"neutral", "specialist"} for roles in components.values()):
         return VerificationState.VERIFIED
+    if allow_single_outlet and len(components) == 1 and any(
+        row.get("registry_matched") is True for row, _ in candidates
+    ):
+        return VerificationState.VERIFIED
     return VerificationState.UNVERIFIED
 
 
 def claim_specific_evidence_row(
-    row: tuple[object, ...], claim_subject: str
+    row: tuple[object, ...],
+    claim_subject: str,
+    *,
+    registry_enabled: bool = False,
+    registry_role: object = None,
+    registry_group: object = None,
+    registry_host: object = None,
+    registry_categories: object = None,
 ) -> dict[str, object]:
     """Adapt one schema-v11 provenance snapshot without trusting broad joins."""
     if len(row) != 9 or type(claim_subject) is not str or not claim_subject.strip():
@@ -218,6 +254,7 @@ def claim_specific_evidence_row(
             "effective_source_role": "",
             "independence_group": "",
             "authority_match": None,
+            "registry_matched": False,
         }
     (
         evidence_role,
@@ -235,6 +272,25 @@ def claim_specific_evidence_row(
         entities = json.loads(authority_entities_json) if isinstance(authority_entities_json, str) else None
     except json.JSONDecodeError:
         scopes, entities = None, None
+    registry_scope = registry_categories
+    try:
+        if isinstance(registry_scope, str):
+            registry_scope = json.loads(registry_scope)
+    except json.JSONDecodeError:
+        registry_scope = None
+    registry_identity_valid = (
+        registry_enabled is True
+        and registry_role in {"primary", "specialist", "neutral"}
+        and isinstance(registry_group, str)
+        and bool(registry_group.strip())
+        and registry_group.strip() != "unknown"
+        and registry_host == publisher_host
+        and type(registry_scope) is list
+        and category in registry_scope
+    )
+    if registry_identity_valid:
+        effective_role = registry_role
+        group = registry_group
     identity_valid = (
         effective_role in {"primary", "neutral", "specialist"}
         and isinstance(group, str)
@@ -267,6 +323,10 @@ def claim_specific_evidence_row(
         "effective_source_role": effective_role if identity_valid else "",
         "independence_group": group.strip() if identity_valid else "",
         "authority_match": authority_match,
+        "registry_matched": (
+            registry_identity_valid
+            and not _NUMERIC_AUTHORITY_SUBJECT.fullmatch(claim_subject.strip())
+        ),
     }
 
 

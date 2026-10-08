@@ -29,6 +29,29 @@ from news_pipeline.schema_v3 import migrate_v3
 from news_pipeline.schema_v4 import migrate_v4
 from news_pipeline.schema_v5 import migrate_v5
 
+from news_pipeline.report_builder import _highest_source_tier
+
+
+class ReportSourceTierTests(unittest.TestCase):
+    def test_highest_source_tier_uses_primary_then_specialist_then_neutral(self):
+        self.assertEqual(
+            _highest_source_tier([
+                ("neutral", "generic.example"),
+                ("specialist", "trade.example"),
+                ("primary", "vendor.example"),
+            ]),
+            ("primary", "vendor.example"),
+        )
+        self.assertEqual(
+            _highest_source_tier([("neutral", "generic.example"), ("specialist", "trade.example")]),
+            ("trade/specialist", "trade.example"),
+        )
+        self.assertEqual(
+            _highest_source_tier([("neutral", "generic.example")]),
+            ("generic news (lowest tier)", "generic.example"),
+        )
+
+
 # -----------------------------------------------------------------------
 # Helper: build a minimal in-memory DB with schema v3 applied
 # -----------------------------------------------------------------------

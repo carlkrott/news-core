@@ -114,6 +114,9 @@ class SchemaV11Tests(unittest.TestCase):
         validate_v11(self.con)
         from news_pipeline.ingest_runner import _verify_schema
         _verify_schema(self.db_path)
+        self.con.execute(
+            "UPDATE source_items SET retrieval_method='rss-poll' WHERE source_item_id='unrelated-item'"
+        )
 
         first = process_phase4(self.db_path, "2026-09-23T07:00:00Z")
         replay = process_phase4(self.db_path, "2026-09-23T07:01:00Z")
@@ -124,7 +127,7 @@ class SchemaV11Tests(unittest.TestCase):
             "SELECT source_item_id,MAX(status) FROM claims GROUP BY source_item_id"
         ).fetchall())
         self.assertEqual(status_by_item["widget-item"], "verified")
-        self.assertEqual(status_by_item["unrelated-item"], "pending")
+        self.assertEqual(status_by_item["unrelated-item"], "verified")
         snapshot = self.con.execute(
             """SELECT si.source_item_id,p.normalized_publisher_host,p.effective_source_role,
                       p.independence_group,p.matched_rule_id,p.authority_scope_json,
@@ -144,8 +147,8 @@ class SchemaV11Tests(unittest.TestCase):
             1,
         )
         self.assertGreaterEqual(
-            self.con.execute("SELECT COUNT(*) FROM event_versions WHERE verification_state='unverified'").fetchone()[0],
-            1,
+            self.con.execute("SELECT COUNT(*) FROM event_versions WHERE verification_state='verified'").fetchone()[0],
+            2,
         )
 
         from news_pipeline.report_builder import run_report
@@ -158,6 +161,10 @@ class SchemaV11Tests(unittest.TestCase):
             )
         self.assertEqual(result.generation_status, "complete")
         self.assertGreaterEqual(result.included_count, 1)
+        report_payload = json.loads(result.artifact_result.json_bytes)
+        self.assertTrue(any(item.get("verification_basis") == "single outlet" for item in report_payload["items"]))
+        self.assertTrue(any(item.get("source_tier") == "primary" for item in report_payload["items"]))
+        self.assertIn(b"Verification basis: single outlet", result.artifact_result.markdown_bytes)
         memberships = self.con.execute(
             """SELECT e.category,ev.verification_state,ev.superseded_at,si.canonical_url
                  FROM report_events re

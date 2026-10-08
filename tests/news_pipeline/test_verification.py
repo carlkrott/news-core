@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import unittest
 
+from unittest.mock import patch
+
 from news_pipeline.verification import (
     GroundingError,
     authority_entity_matches,
@@ -36,6 +38,35 @@ class VerificationTests(unittest.TestCase):
         )
         self.assertEqual(missing_identity["effective_source_role"], "")
         self.assertEqual(verify_evidence([missing_identity]), VerificationState.UNVERIFIED)
+
+    def test_enabled_registry_rule_restores_feed_source_role_only_for_exact_host_and_scope(self):
+        row = (
+            "supports", "discovery", "feed-family", False, "trade-rule",
+            "trade.example", '["ai"]', "[]", "ai",
+        )
+        matched = claim_specific_evidence_row(
+            row, "Story subject", registry_enabled=True,
+            registry_role="specialist", registry_group="trade-family",
+            registry_host="trade.example", registry_categories='["ai"]',
+        )
+        self.assertEqual(matched["effective_source_role"], "specialist")
+        self.assertEqual(matched["independence_group"], "trade-family")
+        self.assertTrue(matched["registry_matched"])
+        self.assertEqual(verify_evidence([matched]), VerificationState.VERIFIED)
+        for bad in (
+            {"registry_host": "other.example"},
+            {"registry_categories": '["hardware"]'},
+            {"registry_enabled": False},
+        ):
+            kwargs = {
+                "registry_enabled": True, "registry_role": "specialist",
+                "registry_group": "trade-family", "registry_host": "trade.example",
+                "registry_categories": '["ai"]',
+            }
+            kwargs.update(bad)
+            not_matched = claim_specific_evidence_row(row, "Story subject", **kwargs)
+            self.assertFalse(not_matched["registry_matched"])
+            self.assertEqual(verify_evidence([not_matched]), VerificationState.UNVERIFIED)
 
     def test_grounded_output_accepts_only_supplied_evidence(self):
         evidence = {"e1": "release v2.0 launched"}
@@ -104,6 +135,29 @@ class VerificationTests(unittest.TestCase):
             "text_hash": "b" * 64, "syndicated_parent": "wire-story-1",
         }
         self.assertEqual(verify_evidence([first, second]), VerificationState.UNVERIFIED)
+
+    def test_single_approved_outlet_can_verify_and_strict_mode_preserves_old_rule(self):
+        primary = {
+            "role": "supports", "effective_source_role": "primary",
+            "independence_group": "vendor-a", "authority_match": False,
+            "matched_rule_id": "vendor-a-rule", "normalized_publisher_host": "vendor.example",
+            "authority_scope_json": '["hardware"]', "authority_entities_json": '["Vendor A"]',
+            "category": "hardware", "registry_matched": True,
+        }
+        specialist = {
+            **primary, "effective_source_role": "specialist",
+            "independence_group": "trade-a", "matched_rule_id": "trade-a-rule",
+            "normalized_publisher_host": "trade.example",
+        }
+        unregistered = {**specialist, "effective_source_role": "discovery", "matched_rule_id": ""}
+        self.assertEqual(verify_evidence([primary]), VerificationState.VERIFIED)
+        self.assertEqual(verify_evidence([specialist]), VerificationState.VERIFIED)
+        self.assertEqual(verify_evidence([unregistered]), VerificationState.UNVERIFIED)
+        self.assertEqual(verify_evidence([specialist], allow_single_outlet=False), VerificationState.UNVERIFIED)
+        with patch.dict("os.environ", {"NEWS_SINGLE_OUTLET_ENABLED": "0"}):
+            self.assertEqual(verify_evidence([specialist]), VerificationState.UNVERIFIED)
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(verify_evidence([specialist]), VerificationState.VERIFIED)
 
     def test_independent_outlets_and_primary_authority_still_verify(self):
         independent = [
