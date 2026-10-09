@@ -104,7 +104,7 @@ class SubjectModelTransportTests(unittest.TestCase):
         self.assertEqual(json.loads(request.data)["model"], "approved-model")
         request_content = json.loads(request.data)["messages"][1]["content"]
         self.assertEqual(json.loads(request_content)["subject"], Subject.PROFESSIONAL_AV.value)
-        self.assertEqual(timeout, subject_model_transport._TIMEOUT_SECONDS)
+        self.assertEqual(timeout, subject_model_transport.request_timeout(len(request.data)))
         self.assertTrue(response.closed)
 
     def test_configured_route_sends_one_bounded_request_and_returns_content(self) -> None:
@@ -133,7 +133,7 @@ class SubjectModelTransportTests(unittest.TestCase):
         payload = json.loads(request.data)
         self.assertEqual(payload["model"], "approved-model")
         self.assertFalse(payload["stream"])
-        self.assertEqual(timeout, subject_model_transport._TIMEOUT_SECONDS)
+        self.assertEqual(timeout, subject_model_transport.request_timeout(len(request.data)))
         self.assertEqual(response.read_limit, 32769)
         self.assertTrue(response.closed)
 
@@ -304,6 +304,50 @@ class TimeoutRuleTests(unittest.TestCase):
                              minimum=m._TIMEOUT_MIN_SECONDS, maximum=m._TIMEOUT_MAX_SECONDS),
         )
         self.assertGreater(m._TIMEOUT_SECONDS, m._MEASURED_P95_SECONDS)
+
+
+class SizeScaledTimeoutTests(unittest.TestCase):
+    """Live 2026-10-09 08:05 run: 6012 B and 2372 B requests took 49 s and 31 s
+    against a fixed 25 s timeout, so every item became a transport_error fallback."""
+
+    @staticmethod
+    def _latency(request_bytes: int) -> float:
+        # Fitted to the measured MacBook calls: 445 B 14.6 s, 842 B 13.5 s,
+        # 2372 B 31.1 s, 6012 B 49.0 s (worst case, rounded up).
+        return 12.0 + 0.0065 * request_bytes
+
+    def _call(self, payload_bytes: int) -> bytes:
+        content = json.dumps({"items": []})
+        response = _Response(
+            json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+        )
+
+        def opener(request: urllib.request.Request, *, timeout: float) -> _Response:
+            if timeout < self._latency(len(request.data)):
+                raise TimeoutError("timed out")
+            return response
+
+        transport = configured_transport(
+            environ={
+                "NEWS_SUBJECT_MODEL_BASE_URL": "https://model.example.test/v1",
+                "NEWS_SUBJECT_MODEL": "test-model",
+            },
+            opener=opener,
+        )
+        request = json.dumps({"pad": "x" * payload_bytes}).encode()
+        return transport(request)
+
+    def test_large_request_gets_timeout_above_its_latency(self) -> None:
+        self.assertEqual(self._call(6000), json.dumps({"items": []}).encode())
+
+    def test_medium_request_gets_timeout_above_its_latency(self) -> None:
+        self.assertEqual(self._call(2300), json.dumps({"items": []}).encode())
+
+    def test_timeout_scales_with_size_and_stays_bounded(self) -> None:
+        m = subject_model_transport
+        self.assertLess(m.request_timeout(500), m.request_timeout(6000))
+        self.assertEqual(m.request_timeout(10**9), m._TIMEOUT_MAX_SECONDS)
+        self.assertGreaterEqual(m.request_timeout(0), m._TIMEOUT_MIN_SECONDS)
 
 
 if __name__ == "__main__":
