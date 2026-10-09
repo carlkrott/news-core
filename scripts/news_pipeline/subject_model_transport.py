@@ -24,11 +24,21 @@ _API_KEY_ENV = "NEWS_SUBJECT_MODEL_API_KEY"
 # shape: 11 ok, p50 10.38 s, p95 12.21 s, max 12.21 s, plus one stall that never
 # returned within a 90 s probe cap (a stall is not fixable by a longer timeout).
 # Margin 2.0 absorbs run-to-run variance (observed ok range 6.6-12.2 s) without
-# letting a stalled call hold the cron lock; 60 s is the ceiling for a cron job.
+# letting a stalled call hold the cron lock.
+#
+# Latency grows with request size (the model writes one summary per input item).
+# 2026-10-09 replay of the 08:05 report on the production host: 445 B 14.6 s,
+# 842 B 13.5 s, 2372 B 31.1 s, 6012 B 49.0 s, all ok with a 170 s cap, but a flat
+# 25 s timed out on the two larger calls (31 items fell back as transport_error).
+# Slope between the 842 B and 6012 B calls is (49.0 - 13.5) / 5170 B = ~0.007 s/B,
+# so the timeout is ceil(margin * (p95 + per_byte * request_bytes)), clamped.
+# Ceiling 120 s: at most 8 calls per run (TOTAL_CALL_BUDGET), and the largest
+# measured call (6012 B -> 109 s) must fit; a stall is still cut off at 120 s.
 _MEASURED_P95_SECONDS = 12.21
+_SECONDS_PER_REQUEST_BYTE = 0.007
 _TIMEOUT_MARGIN = 2.0
 _TIMEOUT_MIN_SECONDS = 10.0
-_TIMEOUT_MAX_SECONDS = 60.0
+_TIMEOUT_MAX_SECONDS = 120.0
 
 
 def timeout_from_p95(
@@ -45,6 +55,13 @@ def timeout_from_p95(
 
 
 _TIMEOUT_SECONDS = timeout_from_p95(_MEASURED_P95_SECONDS)
+
+
+def request_timeout(request_bytes: int) -> float:
+    """Return the transport timeout for a request body of ``request_bytes`` bytes."""
+    return timeout_from_p95(
+        _MEASURED_P95_SECONDS + _SECONDS_PER_REQUEST_BYTE * max(0, request_bytes)
+    )
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -129,7 +146,7 @@ def configured_transport(
             headers["Authorization"] = f"Bearer {api_key}"
         request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
         try:
-            response = opener(request, timeout=_TIMEOUT_SECONDS)
+            response = opener(request, timeout=request_timeout(len(body)))
             try:
                 response_bytes = response.read(MAX_RESPONSE_BYTES + 1)
             finally:
