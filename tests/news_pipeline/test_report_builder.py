@@ -857,5 +857,51 @@ class TestPhase5R3MalformedState(unittest.TestCase):
             os.unlink(db_path)
 
 
+class FragmentDisplayTitleTests(unittest.TestCase):
+    """A summary fragment such as '100%' must not become the display title.
+
+    Live evidence (2026-10-09 08:05 BST report): 21 of 34 items showed a
+    display title of '100%' or 'v1.0' because the verbatim event summary was a
+    short token scraped out of the feed body, while the real headline only
+    existed in ``source_items.title``.
+    """
+
+    NVIDIA_HEADLINE = (
+        "Lower the Cost of Building and Running Visual AI Agents with "
+        "NVIDIA VSS Blueprint 3.3"
+    )
+
+    def _run(self, summary: str, headline: str) -> dict:
+        from news_pipeline.report_builder import run_report
+
+        conn = _make_db()
+        _insert_event_version(conn, "ev-frag", 1, summary, "verified", "2026-09-08T06:00:00Z")
+        conn.execute("UPDATE source_items SET title=?", (headline,))
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            _persist_db(conn, db_path)
+            with tempfile.TemporaryDirectory() as artifact_root:
+                result = run_report(db_path=db_path, artifacts_root=Path(artifact_root), as_of_utc=_as_of(9))
+                return json.loads(result.artifact_result.json_bytes)
+        finally:
+            os.unlink(db_path)
+
+    def test_fragment_summary_falls_back_to_source_headline(self) -> None:
+        payload = self._run("100%", self.NVIDIA_HEADLINE)
+        item = payload["items"][0]
+        self.assertEqual(item["title"], self.NVIDIA_HEADLINE)
+        self.assertEqual(item["summary"], "100%")
+
+    def test_version_token_summary_falls_back_to_source_headline(self) -> None:
+        payload = self._run("v1.0", self.NVIDIA_HEADLINE)
+        self.assertEqual(payload["items"][0]["title"], self.NVIDIA_HEADLINE)
+
+    def test_real_headline_summary_is_preserved(self) -> None:
+        """The fix must not replace a genuine, already-good summary."""
+        payload = self._run("NVIDIA ships a new inference runtime", self.NVIDIA_HEADLINE)
+        self.assertEqual(payload["items"][0]["title"], "NVIDIA ships a new inference runtime")
+
+
 if __name__ == "__main__":
     unittest.main()
