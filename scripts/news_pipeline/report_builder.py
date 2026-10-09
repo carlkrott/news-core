@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -668,6 +669,38 @@ def _event_source_provenance(
     }
 
 
+_FRAGMENT_TITLE_RE = re.compile(r"[\d\s%.,:;+*/\-]*[a-z]*[\d\s%.,:;+*/\-]*", re.IGNORECASE)
+
+
+def _display_title(
+    con: sqlite3.Connection, event_id: str, version: int, summary: str
+) -> str:
+    """Return the report display title for an event version.
+
+    The event summary is the authoritative what-changed text, but it can be a
+    short token lifted verbatim out of a feed body (observed live: '100%' and
+    'v1.0' as display titles on 21 of 34 items). Such a fragment is not a
+    headline, so fall back to the linked source headline. The summary field
+    itself is never rewritten.
+    """
+    title = summary[:256]
+    candidate = title.strip()
+    if len(candidate) >= 5 and _FRAGMENT_TITLE_RE.fullmatch(candidate) is None:
+        return title
+    headline = con.execute(
+        """SELECT si.title FROM event_claims ec
+             JOIN claims c ON c.claim_id=ec.claim_id
+             JOIN source_items si ON si.source_item_id=c.source_item_id
+            WHERE ec.event_id=? AND ec.event_version=?
+              AND si.title IS NOT NULL AND trim(si.title)<>''
+            ORDER BY si.canonical_url LIMIT 1""",
+        (event_id, version),
+    ).fetchone()
+    if headline is None or type(headline[0]) is not str:
+        return title
+    return headline[0].strip()[:256]
+
+
 def _item_dict(con: sqlite3.Connection, row: tuple[str, int, str, str, str, str]) -> dict[str, Any]:
     event_id, version, summary, category, valid_from, change_reason = _validated_event_row(row)
     source_urls = tuple(row[0] for row in con.execute("""
@@ -700,7 +733,7 @@ def _item_dict(con: sqlite3.Connection, row: tuple[str, int, str, str, str, str]
     return {
         "event_id": event_id,
         "event_version": version,
-        "title": summary[:256],
+        "title": _display_title(con, event_id, version, summary),
         "summary": summary,
         "category": category,
         "subject_id": subject_for_category(category).value,
