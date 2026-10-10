@@ -483,7 +483,9 @@ def _canonical_payload_for_briefing_input(
         "category": included.briefing_input.category.value,
         "decision": decision_value,
         "title": candidate.title,
-        "summary": included.summary_item.summary,
+        # Recovery validates the immutable event-version input, not the
+        # downstream editorial/model rewrite used for report presentation.
+        "summary": included.briefing_input.snippet,
     }
     if included.briefing_input.event_id is not None:
         payload.update(

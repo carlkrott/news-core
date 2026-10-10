@@ -557,6 +557,89 @@ class TestDeterministicReplay(unittest.TestCase):
 class TestInterruptedArtifactRecovery(unittest.TestCase):
     """A completed durable shadow run is the restart authority after artifact failure."""
 
+    def test_recovery_uses_event_version_summary_not_model_rewrite(self) -> None:
+        from news_pipeline.briefing_summarizer import (
+            CategorySummaryResult,
+            SummaryItem,
+            SummarySource,
+        )
+        from news_pipeline.event_contracts import event_version_identity
+        from news_pipeline.report_builder import run_report
+
+        event_summary = "The authorized event-version summary."
+        model_summary = "Model rewrite " + ("extended evidence " * 20)
+        conn = _make_db()
+        _insert_event_version(
+            conn, "ev-summary-recovery", 1, event_summary, "verified",
+            "2026-09-08T06:00:00Z",
+        )
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+        try:
+            _persist_db(conn, db_path)
+
+            class LongSummary:
+                model_call_count = 1
+                cache_hit_count = 0
+
+                def summarize_subject(self, _subject, raw_inputs):
+                    return CategorySummaryResult(
+                        items=tuple(
+                            SummaryItem(
+                                candidate_id=event_version_identity(
+                                    _subject.value, item.event_id, item.event_version
+                                ),
+                                summary=model_summary,
+                                source=SummarySource.MODEL,
+                                error_category=None,
+                                subject_id=_subject.value,
+                                event_id=item.event_id,
+                                event_version=item.event_version,
+                                source_url=item.source_urls[0],
+                            )
+                            for item in raw_inputs
+                        ),
+                        model_used=True,
+                        cache_hit=False,
+                    )
+
+            with tempfile.TemporaryDirectory() as artifact_root:
+                # Exercise the deployed subject-summary writer even though this
+                # base fixture stops at schema v5. Fail after the shadow ledger
+                # commits so the next call takes the actual recovery path.
+                with (
+                    mock.patch("news_pipeline.report_builder._subject_schema_available", return_value=True),
+                    mock.patch("news_pipeline.report_builder._persist_subject_reports"),
+                    mock.patch("news_pipeline.report_builder._default_subject_summarizer", return_value=LongSummary()),
+                    mock.patch(
+                        "news_pipeline.report_builder.compute_artifacts",
+                        side_effect=RuntimeError("injected artifact failure"),
+                    ),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "injected artifact failure"):
+                        run_report(db_path, Path(artifact_root), _as_of(9))
+
+                check = sqlite3.connect(db_path)
+                try:
+                    stored_payload = json.loads(
+                        check.execute(
+                            "SELECT payload_json FROM shadow_briefing_run_events"
+                        ).fetchone()[0]
+                    )
+                    self.assertEqual(stored_payload["summary"], event_summary)
+                    self.assertNotEqual(stored_payload["summary"], model_summary)
+                finally:
+                    check.close()
+
+                with (
+                    mock.patch("news_pipeline.report_builder._subject_schema_available", return_value=True),
+                    mock.patch("news_pipeline.report_builder._persist_subject_reports"),
+                ):
+                    recovered = run_report(db_path, Path(artifact_root), _as_of(10))
+                self.assertEqual(recovered.included_count, 1)
+        finally:
+            os.unlink(db_path)
+
     def test_restart_recovers_without_rerunning_shadow_engine(self) -> None:
         from news_pipeline.report_builder import run_report
 
