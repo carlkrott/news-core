@@ -16,6 +16,7 @@ from news_pipeline import db as news_db
 from news_pipeline.adapters.base import FetchRequest, FetchResponse, NetworkError
 from news_pipeline.ingest_runner import (
     IngestReport,
+    _backoff_seconds,
     _claim_queries,
     _filter_reason,
     _open_writer,
@@ -236,6 +237,7 @@ class RunnerCase(unittest.IsolatedAsyncioTestCase):
         source_ids=None,
         max_queries=None,
         timing: FakeTiming | None = None,
+        finished_at: str = FINISHED_AT,
     ) -> IngestReport:
         timing = timing or FakeTiming()
         return await run_ingest(
@@ -250,7 +252,7 @@ class RunnerCase(unittest.IsolatedAsyncioTestCase):
             transport_factory=factory,
             async_sleep=timing.sleep,
             monotonic=timing.monotonic,
-            utc_now=lambda: FINISHED_AT,
+            utc_now=lambda: finished_at,
         )
 
     def rows(self, sql: str, params=()) -> list[tuple]:
@@ -339,11 +341,12 @@ class SchemaAndLeaseTests(RunnerCase):
         connection = _open_writer(self.db)
         try:
             enabled = lambda: dict(connection.execute("SELECT source_id,enabled FROM source_registry WHERE source_id LIKE 'src%'"))
-            _sync_sources(connection, both.sources, RUN_AT)
+            self.assertEqual(_sync_sources(connection, both.sources, RUN_AT), 0)
             self.assertEqual(enabled(), {"src1": 1, "src2": 1})
-            _sync_sources(connection, only_first.sources, "2026-01-01T00:01:00Z")
+            self.assertEqual(_sync_sources(connection, only_first.sources, "2026-01-01T00:01:00Z"), 1)
             self.assertEqual(enabled(), {"src1": 1, "src2": 0})
-            _sync_sources(connection, both.sources, "2026-01-01T00:02:00Z")
+            self.assertEqual(_sync_sources(connection, only_first.sources, "2026-01-01T00:01:30Z"), 0)
+            self.assertEqual(_sync_sources(connection, both.sources, "2026-01-01T00:02:00Z"), 0)
             self.assertEqual(enabled(), {"src1": 1, "src2": 1})
         finally:
             connection.close()
@@ -651,6 +654,62 @@ class RetryAndFailureTests(RunnerCase):
         )[0][0]
         self.assertNotIn("token=secret", stored_error)
         self.assertEqual(report.total_items_inserted, 1)
+
+
+class FailureBackoffTests(RunnerCase):
+    async def run_at(self, factory, run_at: str) -> IngestReport:
+        self.make_due("src1")
+        finished = run_at[:-3] + "10Z"
+        return await self.run_with(factory, run_at=run_at, finished_at=finished)
+
+    def test_backoff_doubles_from_the_third_failure_and_caps_at_a_day(self) -> None:
+        self.assertEqual(_backoff_seconds(0, 60), 0)
+        self.assertEqual(_backoff_seconds(2, 60), 0)
+        self.assertEqual(_backoff_seconds(3, 60), 2 * 3600)
+        self.assertEqual(_backoff_seconds(4, 60), 4 * 3600)
+        self.assertEqual(_backoff_seconds(7, 60), 24 * 3600)
+        self.assertEqual(_backoff_seconds(64, 30), 24 * 3600)
+
+    async def test_third_straight_failure_backs_off_and_success_resets(self) -> None:
+        failing = ScriptedFactory({"src1": [NetworkError("offline")]})
+        reports = [
+            await self.run_at(failing, f"2026-01-01T0{hour}:00:00Z") for hour in range(3)
+        ]
+        streaks = [report.source_results[0].failure_streak for report in reports]
+        self.assertEqual(streaks, [1, 2, 3])
+        self.assertEqual(reports[1].source_results[0].next_due_at, "2026-01-01T01:05:10Z")
+        third = reports[2].source_results[0]
+        self.assertEqual(third.failing_since, "2026-01-01T00:00:00Z")
+        self.assertEqual(third.next_due_at, "2026-01-01T03:00:10Z")  # 30 min cadence * 2
+        self.assertFalse(third.failing_24h)
+        self.assertEqual(reports[2].sources_backed_off, 1)
+        self.assertEqual(reports[1].sources_backed_off, 0)
+
+        healthy = ScriptedFactory({"src1": [response(body=result_body(article()))]})
+        recovered = (await self.run_at(healthy, "2026-01-01T03:00:00Z")).source_results[0]
+        self.assertEqual((recovered.failure_streak, recovered.failing_since), (0, None))
+        self.assertEqual(recovered.next_due_at, "2026-01-01T03:30:10Z")
+        again = (await self.run_at(failing, "2026-01-01T04:00:00Z")).source_results[0]
+        self.assertEqual((again.failure_streak, again.next_due_at), (1, "2026-01-01T04:05:10Z"))
+
+    async def test_rate_limited_runs_neither_extend_nor_break_the_streak(self) -> None:
+        failing = ScriptedFactory({"src1": [NetworkError("offline")]})
+        limited = ScriptedFactory({"src1": [response(status=429)]})
+        await self.run_at(failing, "2026-01-01T00:00:00Z")
+        report = await self.run_at(limited, "2026-01-01T01:00:00Z")
+        self.assertEqual(report.source_results[0].failure_streak, 0)
+        report = await self.run_at(failing, "2026-01-01T02:00:00Z")
+        self.assertEqual(report.source_results[0].failure_streak, 2)
+
+    async def test_a_source_failing_for_a_day_is_flagged(self) -> None:
+        failing = ScriptedFactory({"src1": [NetworkError("offline")]})
+        await self.run_at(failing, "2026-01-01T00:00:00Z")
+        await self.run_at(failing, "2026-01-01T12:00:00Z")
+        report = await self.run_at(failing, "2026-01-02T00:00:00Z")
+        result = report.source_results[0]
+        self.assertTrue(result.failing_24h)
+        self.assertEqual(report.sources_failing_24h, 1)
+        self.assertEqual(result.next_due_at, "2026-01-02T01:00:10Z")
 
 
 class LimitAndConcurrencyTests(RunnerCase):
