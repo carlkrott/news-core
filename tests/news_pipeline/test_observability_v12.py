@@ -142,6 +142,8 @@ class JobRunRecordingTests(_V11Fixture):
         self.assertEqual((ai["verified"], ai["event_versions"], ai["eligible"]), (2, 2, 2))
         summary = json.loads(self.con.execute("SELECT summary_json FROM job_runs").fetchone()[0])
         self.assertEqual(summary["funnel_24h"]["categories"]["ai"]["items"], 2)
+        self.assertEqual(out["claims_pending_age"]["expiry_days"], 14)
+        self.assertEqual(summary["claims_pending_age"]["expired"], 0)
 
 
 class FunnelTests(_V11Fixture):
@@ -151,6 +153,33 @@ class FunnelTests(_V11Fixture):
         later = observability.category_funnel(self.db_path, "2026-09-25T06:00:00Z")
         self.assertNotIn("ai", later["categories"])
         self.assertEqual(later["stories"], {})
+
+
+class ClaimsPendingAgeTests(_V11Fixture):
+    def test_pending_claims_bucket_by_age_and_expire_after_14_days(self) -> None:
+        code, out = self.run_job(
+            "process", "--db", str(self.db_path), "--evaluated-at", APPLIED_AT, "--enable-network",
+        )
+        self.assertEqual(code, 0, out)
+        ids = [row[0] for row in self.con.execute("SELECT claim_id FROM claims ORDER BY claim_id")]
+        self.assertGreaterEqual(len(ids), 2)
+        ages = {ids[0]: "2026-10-12T06:00:00Z", ids[1]: "2026-09-20T00:00:00Z"}
+        for claim_id, extracted_at in ages.items():
+            self.con.execute(
+                "UPDATE claims SET status='pending',extracted_at=? WHERE claim_id=?",
+                (extracted_at, claim_id),
+            )
+        self.con.commit()
+        age = observability.claims_pending_age(self.db_path, "2026-10-12T08:00:00Z")
+        self.assertEqual(
+            age["buckets"], {"lt_1d": 1, "1_3d": 0, "3_7d": 0, "7_14d": 0, "expired": 1}
+        )
+        self.assertEqual((age["pending"], age["expired"]), (1, 1))
+        self.assertEqual(age["oldest_pending_at"], "2026-10-12T06:00:00Z")
+        self.assertEqual(age["oldest_at"], "2026-09-20T00:00:00Z")
+        before = observability.claims_pending_age(self.db_path, "2026-10-01T00:00:00Z")
+        self.assertEqual(before["buckets"]["7_14d"], 1)  # 11 days old then, not yet expired
+        self.assertEqual(before["pending"], 1)  # the later claim did not exist yet
 
 
 class _Response:

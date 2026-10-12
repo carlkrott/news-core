@@ -19,6 +19,10 @@ from typing import Any
 from .schema_v12 import JOB_RUN_STATES, MODEL_CALL_OUTCOMES, v12_available
 
 _SUMMARY_LIMIT_BYTES = 16384
+# A pending claim older than this is reported as expired. Expiry is derived at read
+# time and changes no row: a later corroboration (event_store) may still verify it.
+CLAIM_EXPIRY_DAYS = 14
+_CLAIM_AGE_BUCKETS = (("lt_1d", 1), ("1_3d", 3), ("3_7d", 7), ("7_14d", CLAIM_EXPIRY_DAYS))
 _BUSY_TIMEOUT_SECONDS = 5.0
 
 
@@ -70,7 +74,7 @@ def summary_json(payload: Mapping[str, Any]) -> str:
     for key, item in payload.items():
         if item is None or type(item) in (int, float, str, bool):
             summary[key] = item
-        elif key in {"counts", "event_counts", "funnel_24h", "error"} and isinstance(item, Mapping):
+        elif key in {"counts", "event_counts", "funnel_24h", "claims_pending_age", "error"} and isinstance(item, Mapping):
             summary[key] = item
     text = json.dumps(summary, ensure_ascii=False, separators=(",", ":"), default=str)
     if len(text.encode("utf-8")) > _SUMMARY_LIMIT_BYTES:
@@ -279,8 +283,46 @@ def category_funnel(db_path: str | Path, as_of: str, *, hours: int = 24) -> dict
         connection.close()
 
 
+def claims_pending_age(db_path: str | Path, as_of: str) -> dict[str, Any]:
+    """Pending claims by age at ``as_of`` (read-only); older than 14 days counts as expired."""
+    if not as_of.endswith("Z"):
+        raise ValueError("as_of must be a UTC Z timestamp")
+    upper_dt = datetime.fromisoformat(as_of[:-1] + "+00:00")
+
+    def bound(days: int) -> str:
+        return (upper_dt - timedelta(days=days)).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    connection = sqlite3.connect(f"file:{Path(db_path)}?mode=ro", uri=True, timeout=_BUSY_TIMEOUT_SECONDS)
+    try:
+        columns = ["SUM(extracted_at>=?)"]
+        params: list[str] = [bound(1)]
+        for (_, newer), (_, older) in zip(_CLAIM_AGE_BUCKETS, _CLAIM_AGE_BUCKETS[1:]):
+            columns.append("SUM(extracted_at<? AND extracted_at>=?)")
+            params += [bound(newer), bound(older)]
+        columns += ["SUM(extracted_at<?)", "MIN(CASE WHEN extracted_at>=? THEN extracted_at END)", "MIN(extracted_at)"]
+        params += [bound(CLAIM_EXPIRY_DAYS), bound(CLAIM_EXPIRY_DAYS)]
+        row = connection.execute(
+            f"SELECT {','.join(columns)} FROM claims WHERE status='pending' AND extracted_at<=?",
+            (*params, as_of),
+        ).fetchone()
+    finally:
+        connection.close()
+    counts = [int(value or 0) for value in row[: len(_CLAIM_AGE_BUCKETS) + 1]]
+    buckets = dict(zip([name for name, _ in _CLAIM_AGE_BUCKETS] + ["expired"], counts))
+    return {
+        "expiry_days": CLAIM_EXPIRY_DAYS,
+        "pending": sum(counts[:-1]),
+        "expired": counts[-1],
+        "buckets": buckets,
+        "oldest_pending_at": row[-2],
+        "oldest_at": row[-1],
+    }
+
+
 __all__ = [
+    "CLAIM_EXPIRY_DAYS",
     "category_funnel",
+    "claims_pending_age",
     "iso_ms",
     "model_call_counts",
     "plain",

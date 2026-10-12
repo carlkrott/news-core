@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from .observability import category_funnel, iso_ms, plain, record_job_run, scalars, utc_now
+from .observability import category_funnel, claims_pending_age, iso_ms, plain, record_job_run, scalars, utc_now
 
 
 _FACTORY_RE = re.compile(
@@ -248,6 +248,10 @@ def _run_process(args: argparse.Namespace) -> int:
         funnel: dict[str, Any] = category_funnel(args.db, args.evaluated_at)
     except Exception as exc:
         funnel = {"error_class": _error_class(exc)}
+    try:
+        pending_age: dict[str, Any] = claims_pending_age(args.db, args.evaluated_at)
+    except Exception as exc:
+        pending_age = {"error_class": _error_class(exc)}
     _json({
         "job": "process",
         "state": "completed",
@@ -257,6 +261,7 @@ def _run_process(args: argparse.Namespace) -> int:
         "counts": scalars(report),
         "event_counts": scalars(event_report),
         "funnel_24h": funnel,
+        "claims_pending_age": pending_age,
     })
     return 0
 

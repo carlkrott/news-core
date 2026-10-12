@@ -59,6 +59,11 @@ _HOST_DELAY_SECONDS = 1.0
 _LEASE_SECONDS = 300
 _MAX_RETRIES = 1
 _DEFAULT_RETRY_SECONDS = 300
+# Failure backoff: from the third straight failed run, the retry interval is
+# cadence * 2**(streak-2), capped at 24 h. A source failing that long is flagged.
+_BACKOFF_AFTER_FAILURES = 3
+_BACKOFF_CAP_SECONDS = 24 * 60 * 60
+_BACKOFF_RUN_WINDOW = 64
 
 AsyncSleep = Callable[[float], Awaitable[None]]
 Monotonic = Callable[[], float]
@@ -123,6 +128,9 @@ class SourceResult:
     error: str | None = None
     feed_lane_ids: tuple[str, ...] = field(default_factory=tuple)
     queries_not_modified: int = 0
+    failure_streak: int = 0
+    failing_since: str | None = None
+    failing_24h: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +150,9 @@ class IngestReport:
     # HTTP 304 answers to conditional GETs: "unchanged since last fetch", not
     # "fetched and empty". Reporting only; the stored query status is unchanged.
     total_queries_not_modified: int = 0
+    sources_retired: int = 0
+    sources_backed_off: int = 0
+    sources_failing_24h: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,7 +262,7 @@ async def run_ingest(
     now = utc_now if utc_now is not None else _utc_now
     connection = _open_writer(path)
     try:
-        _sync_sources(connection, config.sources, run_started_at)
+        retired = _sync_sources(connection, config.sources, run_started_at)
         claims = _claim_queries(
             connection,
             config.sources,
@@ -260,7 +271,7 @@ async def run_ingest(
             max_queries=max_queries,
         )
         if not claims:
-            return IngestReport(run_started_at, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+            return IngestReport(run_started_at, 0, 0, 0, 0, 0, 0, 0, 0, 0, sources_retired=retired)
 
         jobs = _prepare_jobs(connection, claims, run_started_at)
         global_semaphore = asyncio.Semaphore(_GLOBAL_CONCURRENCY)
@@ -313,6 +324,9 @@ async def run_ingest(
             query_results=tuple(query_results),
             source_results=tuple(source_results),
             total_queries_not_modified=sum(result.http_status == 304 for result in query_results),
+            sources_retired=retired,
+            sources_backed_off=sum(result.failure_streak >= _BACKOFF_AFTER_FAILURES for result in source_results),
+            sources_failing_24h=sum(result.failing_24h for result in source_results),
         )
     finally:
         connection.close()
@@ -429,7 +443,8 @@ def _sync_sources(
     connection: sqlite3.Connection,
     sources: tuple[SourceContract, ...],
     created_at: str,
-) -> None:
+) -> int:
+    """Upsert configured sources; return how many registry rows were retired."""
     connection.execute("BEGIN IMMEDIATE")
     try:
         for source in sources:
@@ -472,10 +487,12 @@ def _sync_sources(
             f"UPDATE source_registry SET enabled=0 WHERE enabled=1 AND source_id NOT IN ({','.join('?' * len(configured))})",
             configured,
         )
+        retired = connection.execute("SELECT changes()").fetchone()[0]
         connection.commit()
     except sqlite3.Error:
         connection.rollback()
         raise
+    return retired
 
 
 def _claim_queries(
@@ -1050,9 +1067,16 @@ def _finalize_sources(
         selected_outcomes = [outcome_by_attempt[result.attempt_id] for result in selected]
         completion = max(outcome.finished_at for outcome in selected_outcomes)
         failures = [result for result in selected if result.status in ("failed", "rate_limited", "lease_lost")]
+        run_failed = any(result.status == "failed" for result in selected) and not any(
+            result.status in ("success", "partial") for result in selected
+        )
+        streak, failing_since = _failure_streak(connection, claim.source.source_id) if run_failed else (0, None)
+        failing_24h = failing_since is not None and (
+            _parse_utc(completion, "finished_at") - _parse_utc(failing_since, "failing_since")
+        ) >= timedelta(seconds=_BACKOFF_CAP_SECONDS)
         if failures:
             retry_seconds = max(
-                [_DEFAULT_RETRY_SECONDS]
+                [_DEFAULT_RETRY_SECONDS, _backoff_seconds(streak, claim.source.cadence_minutes or 60)]
                 + [result.retry_after_seconds or 0 for result in failures]
             )
             next_due = _format_utc(_parse_utc(completion, "finished_at") + timedelta(seconds=retry_seconds))
@@ -1098,9 +1122,42 @@ def _finalize_sources(
                 error="; ".join(errors) if errors else ("source lease was replaced" if effective_next_due is None else None),
                 feed_lane_ids=tuple(sorted({result.feed_lane_id for result in selected if result.feed_lane_id})),
                 queries_not_modified=sum(result.http_status == 304 for result in selected),
+                failure_streak=streak,
+                failing_since=failing_since,
+                failing_24h=failing_24h,
             )
         )
     return results
+
+
+def _failure_streak(connection: sqlite3.Connection, source_id: str) -> tuple[int, str | None]:
+    """Count the source's consecutive failed runs, newest first, and when the streak began.
+
+    A run is one ``started_at``; it failed when no query succeeded or was partial.
+    Rate-limited and unfinished attempts neither extend nor break the streak.
+    """
+    rows = connection.execute(
+        """SELECT a.started_at, MAX(a.status IN ('success','partial'))
+           FROM query_attempts a JOIN query_plans p ON p.query_plan_id=a.query_plan_id
+           WHERE p.source_id=? AND a.status IN ('success','partial','failed')
+           GROUP BY a.started_at ORDER BY a.started_at DESC LIMIT ?""",
+        (source_id, _BACKOFF_RUN_WINDOW),
+    ).fetchall()
+    streak = 0
+    since: str | None = None
+    for started_at, succeeded in rows:
+        if succeeded:
+            break
+        streak += 1
+        since = started_at
+    return streak, since
+
+
+def _backoff_seconds(streak: int, cadence_minutes: int) -> int:
+    if streak < _BACKOFF_AFTER_FAILURES:
+        return 0
+    doublings = min(streak - 2, 16)
+    return min(cadence_minutes * 60 * 2**doublings, _BACKOFF_CAP_SECONDS)
 
 
 def _safe_error(error: BaseException) -> str:
