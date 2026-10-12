@@ -250,5 +250,74 @@ class ModelCallPersistenceTests(_V11Fixture):
         )
 
 
+class ShadowReportCliTests(_V11Fixture):
+    """news_cli is the 08:05 shadow run: the only path that makes real model calls."""
+
+    ENV = ModelCallRecordingTests.ENV
+
+    def run_cli(self, fake_run_report) -> tuple[int, str, str]:
+        from news_pipeline import news_cli
+
+        artifacts = self.db_path.parent / "artifacts"
+        artifacts.mkdir(exist_ok=True)
+        out, err = io.StringIO(), io.StringIO()
+        with patch("news_pipeline.report_builder.run_report", side_effect=fake_run_report), \
+                redirect_stdout(out), patch("sys.stderr", err):
+            code = news_cli.main([
+                "--db", str(self.db_path), "--artifact-root", str(artifacts),
+                "--as-of-utc", V12_AT,
+            ])
+        return code, out.getvalue(), err.getvalue()
+
+    def _model_call(self) -> None:
+        transport = configured_transport(
+            environ=self.ENV, opener=lambda request, *, timeout: _Response(_ok_body())
+        )
+        transport(b'{"items":[]}')
+
+    def test_success_records_model_call_and_job_run(self) -> None:
+        from types import SimpleNamespace
+
+        migrate_v12(self.con, V12_AT)
+
+        def fake_run_report(*_args, **_kwargs):
+            self._model_call()
+            return SimpleNamespace(
+                report_id="r1", window_start=APPLIED_AT, window_end=V12_AT,
+                generation_status="completed", was_replayed=False,
+                included_count=1, excluded_count=0, artifact_result=None,
+            )
+
+        code, out, _err = self.run_cli(fake_run_report)
+        self.assertEqual(code, 0)
+        output = json.loads(out)
+        self.assertEqual(output["model_calls"], {"ok": 1})
+        self.assertIn("duration_ms", output)
+        self.assertEqual(
+            self.con.execute("SELECT job,outcome,model FROM model_calls").fetchall(),
+            [("shadow-report", "ok", "approved-model")],
+        )
+        self.assertEqual(
+            self.con.execute("SELECT job,slot_utc,state,exit_code FROM job_runs").fetchall(),
+            [("shadow-report", V12_AT, "completed", 0)],
+        )
+
+    def test_failure_still_records_calls_and_failed_run(self) -> None:
+        migrate_v12(self.con, V12_AT)
+
+        def fake_run_report(*_args, **_kwargs):
+            self._model_call()
+            raise RuntimeError("report exploded")
+
+        code, _out, err = self.run_cli(fake_run_report)
+        self.assertEqual(code, 1)
+        self.assertIn("runtime", err)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM model_calls").fetchone(), (1,))
+        self.assertEqual(
+            self.con.execute("SELECT job,state,exit_code,error_class FROM job_runs").fetchall(),
+            [("shadow-report", "failed", 1, "RuntimeError")],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
