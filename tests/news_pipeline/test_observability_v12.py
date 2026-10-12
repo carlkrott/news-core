@@ -321,5 +321,19 @@ class ShadowReportCliTests(_V11Fixture):
         )
 
 
+class IngestSchemaGateTests(_V11Fixture):
+    """Every cron job's schema gate must admit v12 (tick refused it on 2026-10-12)."""
+
+    def test_ingest_gate_admits_v12_and_checks_its_tables(self) -> None:
+        from news_pipeline.ingest_runner import _verify_schema
+
+        _verify_schema(self.db_path)
+        migrate_v12(self.con, V12_AT)
+        _verify_schema(self.db_path)
+        self.con.execute("ALTER TABLE job_runs ADD COLUMN extra TEXT")
+        with self.assertRaisesRegex(ValueError, "job_runs has incompatible columns"):
+            _verify_schema(self.db_path)
+
+
 if __name__ == "__main__":
     unittest.main()
