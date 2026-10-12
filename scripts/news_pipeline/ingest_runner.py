@@ -49,6 +49,7 @@ from .schema_v8 import V8_COLUMNS, V8_TABLES
 from .schema_v9 import V9_COLUMNS, V9_TABLES
 from .schema_v10 import V10_COLUMNS, V10_TABLES
 from .schema_v11 import V11_COLUMNS, V11_TABLES
+from .schema_v12 import V12_COLUMNS, V12_TABLES
 from .source_registry import load_registry
 from .models import subject_for_category
 
@@ -337,10 +338,11 @@ def _verify_schema(db_path: Path) -> None:
                 {1, 2, 3, 4, 5, 6, 7, 8, 9},
                 {1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
                 {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
+                {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
             )
             if markers not in accepted_markers:
                 raise ValueError(
-                    "database schema markers must be a known additive v4-v11 prefix, "
+                    "database schema markers must be a known additive v4-v12 prefix, "
                     f"got {sorted(markers)}"
                 )
             tables = {
@@ -369,7 +371,7 @@ def _verify_schema(db_path: Path) -> None:
                 expected_columns.update(V8_COLUMNS)
                 expected_columns.update(V9_COLUMNS)
                 expected_columns.update(V10_COLUMNS)
-            if markers == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}:
+            if markers >= {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}:
                 required |= (
                     set(V7_TABLES) | set(V8_TABLES) | set(V9_TABLES)
                     | set(V10_TABLES) | set(V11_TABLES)
@@ -379,6 +381,9 @@ def _verify_schema(db_path: Path) -> None:
                 expected_columns.update(V9_COLUMNS)
                 expected_columns.update(V10_COLUMNS)
                 expected_columns.update(V11_COLUMNS)
+            if markers == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}:
+                required |= set(V12_TABLES)
+                expected_columns.update(V12_COLUMNS)
             missing = sorted(required - tables)
             if missing:
                 raise ValueError(f"database is missing required tables: {missing}")

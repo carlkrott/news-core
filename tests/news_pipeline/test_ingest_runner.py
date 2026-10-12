@@ -302,7 +302,7 @@ class SchemaAndLeaseTests(RunnerCase):
             connection.commit()
         finally:
             connection.close()
-        with self.assertRaisesRegex(ValueError, "known additive v4-v11 prefix"):
+        with self.assertRaisesRegex(ValueError, "known additive v4-v12 prefix"):
             _verify_schema(self.db)
 
     async def test_config_sync_preserves_runtime_due_and_updates_hash(self) -> None:
