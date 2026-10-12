@@ -7,6 +7,7 @@ import sqlite3
 import unittest
 import urllib.error
 from contextlib import redirect_stdout
+from pathlib import Path
 from unittest.mock import patch
 
 from news_pipeline import observability
@@ -333,6 +334,15 @@ class IngestSchemaGateTests(_V11Fixture):
         self.con.execute("ALTER TABLE job_runs ADD COLUMN extra TEXT")
         with self.assertRaisesRegex(ValueError, "job_runs has incompatible columns"):
             _verify_schema(self.db_path)
+
+    def test_ingest_gate_names_the_newest_schema_module(self) -> None:
+        import news_pipeline
+        import news_pipeline.ingest_runner as ingest_runner
+
+        package = Path(news_pipeline.__file__).parent
+        newest = max(int(path.stem.removeprefix("schema_v")) for path in package.glob("schema_v*.py"))
+        source = Path(ingest_runner.__file__).read_text(encoding="utf-8")
+        self.assertIn(f"v4-v{newest} prefix", source, "a new schema module needs a matching ingest gate")
 
 
 if __name__ == "__main__":
