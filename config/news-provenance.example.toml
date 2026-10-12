@@ -1,5 +1,9 @@
 # Sanitized publisher provenance examples only.
 # Live source rules belong in a private operator configuration and must not be published.
+# Never edit a rule that is live: ingest persists each matched rule to publisher_registry
+# and reads it back exactly, so a changed rule fails the tick. Widen a publisher to
+# another category with a new rule_id (same host and independence_group) instead.
+# Aggregator copies (msn.com, yahoo.com) get no rule: they stay discovery-only.
 version = 1
 
 [[publishers]]

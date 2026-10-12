@@ -158,6 +158,45 @@ class PublisherRegistryTests(unittest.TestCase):
             VerificationState.UNVERIFIED,
         )
 
+    def test_one_host_widened_to_a_new_category_by_a_separate_rule(self) -> None:
+        # Stored rules must never change (ingest reads them back exactly), so a
+        # publisher is widened with a new rule ID per category, not an edit.
+        registry = PublisherRegistry(
+            (
+                PublisherRule(
+                    rule_id="newsroom-ai",
+                    host="newsroom.example.com",
+                    source_role=SourceRole.NEUTRAL,
+                    independence_group="newsroom",
+                    categories=("ai",),
+                    audit_note="neutral newsroom, ai scope",
+                ),
+                PublisherRule(
+                    rule_id="newsroom-world",
+                    host="newsroom.example.com",
+                    source_role=SourceRole.NEUTRAL,
+                    independence_group="newsroom",
+                    categories=("world",),
+                    audit_note="neutral newsroom, world scope",
+                ),
+            )
+        )
+        for category, rule_id in (("ai", "newsroom-ai"), ("world", "newsroom-world")):
+            result = registry.classify(
+                "https://www.newsroom.example.com/story",
+                category=category,
+                classified_at=CLASSIFIED_AT,
+            )
+            self.assertEqual(result.matched_rule_id, rule_id)
+            self.assertEqual(result.independence_group, "newsroom")
+        aggregator = registry.classify(
+            "https://www.aggregator.example.com/newsroom-copy",
+            category="world",
+            classified_at=CLASSIFIED_AT,
+        )
+        self.assertIsNone(aggregator.matched_rule_id)
+        self.assertEqual(aggregator.effective_source_role, SourceRole.DISCOVERY)
+
     def test_public_example_registry_loads_without_live_values(self) -> None:
         config = load_provenance("config/news-provenance.example.toml")
         self.assertTrue(config.rules)
