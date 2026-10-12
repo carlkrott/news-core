@@ -12,6 +12,7 @@ from json import JSONDecoder
 from typing import Iterable, Mapping
 
 from .live_contracts import EvidenceRole, QueryPlanContract, VerificationState, stable_id
+from .provenance import publisher_host_matches
 
 
 class GroundingError(ValueError):
@@ -284,7 +285,9 @@ def claim_specific_evidence_row(
         and isinstance(registry_group, str)
         and bool(registry_group.strip())
         and registry_group.strip() != "unknown"
-        and registry_host == publisher_host
+        and isinstance(registry_host, str)
+        and isinstance(publisher_host, str)
+        and publisher_host_matches(publisher_host, registry_host)
         and type(registry_scope) is list
         and category in registry_scope
     )

@@ -252,5 +252,72 @@ class SchemaV11Tests(unittest.TestCase):
         validate_v11(self.con)
 
 
+
+class SubdomainRegistryVerificationTests(unittest.TestCase):
+    """A rule for newsroom.example.test covers www.newsroom.example.test end to end."""
+
+    def test_www_item_under_bare_domain_rule_verifies_single_outlet(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "candidate.db"
+            init_db(str(db_path))
+            con = sqlite3.connect(db_path, isolation_level=None)
+            try:
+                con.execute("PRAGMA foreign_keys=ON")
+                for migration in (migrate_v3, migrate_v4, migrate_v5, migrate_v6):
+                    migration(con, APPLIED_AT)
+                con.execute(
+                    "INSERT INTO runs VALUES (?,?,?,?,?,?,?)",
+                    ("source-run", APPLIED_AT, None, "historical_replay", "observed_historical", None, None),
+                )
+                con.execute(
+                    "INSERT INTO source_registry VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    ("world-rss", "rss", "discovery", "feeds.newsroom.example.test", '["world"]', 1,
+                     "[]", "[]", "[]", "[]", "[]", 60, None, None, None, "a" * 64, APPLIED_AT),
+                )
+                # Distinct facts per item: equal claim keys would share evidence.
+                for item_id, url, percent in (
+                    ("www-item", "https://www.newsroom.example.test/story", 40),
+                    ("lookalike-item", "https://evilnewsroom.example.test/story", 55),
+                ):
+                    con.execute(
+                        "INSERT INTO source_items VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (item_id, "world-rss", item_id, "world", url, url, "Newsroom", "discovery", None,
+                         "rss-poll", "a" * 64, "Summit", f"Summit agreed {percent}% cut",
+                         None, "2026-09-22T08:00:00Z", "2026-09-22T08:00:00Z", None, "publisher date"),
+                    )
+                    con.execute(
+                        "INSERT INTO decisions VALUES (?,?,?,?,?,?,?)",
+                        (f"decision-{item_id}", "source-run", None, "keep",
+                         json.dumps({"source_item_id": item_id}), "2026-09-23T06:01:00Z", "phase3"),
+                    )
+                rule = PublisherRule(
+                    rule_id="newsroom-world-neutral",
+                    host="newsroom.example.test",
+                    source_role=SourceRole.NEUTRAL,
+                    independence_group="newsroom",
+                    categories=("world",),
+                    audit_note="neutral newsroom, world scope",
+                )
+                migrate_v7(con, APPLIED_AT, rules=(rule,))
+                migrate_v8(con, APPLIED_AT)
+                migrate_v9(con, APPLIED_AT)
+                migrate_v10(con, APPLIED_AT)
+                self.assertTrue(migrate_v11(con, APPLIED_AT))
+                self.assertEqual(
+                    con.execute(
+                        "SELECT normalized_publisher_host,matched_rule_id FROM source_item_provenance "
+                        "WHERE source_item_id='www-item'"
+                    ).fetchone(),
+                    ("www.newsroom.example.test", "newsroom-world-neutral"),
+                )
+                process_phase4(db_path, "2026-09-23T07:00:00Z")
+                status_by_item = dict(con.execute(
+                    "SELECT source_item_id,MAX(status) FROM claims GROUP BY source_item_id"
+                ).fetchall())
+                self.assertEqual(status_by_item["www-item"], "verified")
+                self.assertEqual(status_by_item["lookalike-item"], "pending")
+            finally:
+                con.close()
+
 if __name__ == "__main__":
     unittest.main()

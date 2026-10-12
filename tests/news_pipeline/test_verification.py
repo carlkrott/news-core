@@ -68,6 +68,34 @@ class VerificationTests(unittest.TestCase):
             self.assertFalse(not_matched["registry_matched"])
             self.assertEqual(verify_evidence([not_matched]), VerificationState.UNVERIFIED)
 
+    def test_registry_rule_host_covers_subdomains_like_classification(self):
+        # classify() matches a rule host or any subdomain of it (www.bbc.co.uk
+        # under bbc.co.uk); the claim check must accept the same hosts.
+        kwargs = {
+            "registry_enabled": True, "registry_role": "neutral",
+            "registry_group": "bbc", "registry_host": "bbc.co.uk",
+            "registry_categories": '["world"]',
+        }
+        for host, expected in (
+            ("bbc.co.uk", True),
+            ("www.bbc.co.uk", True),
+            ("news.www.bbc.co.uk", True),
+            ("evilbbc.co.uk", False),
+            ("bbc.co.uk.evil.example", False),
+            ("co.uk", False),
+        ):
+            row = (
+                "supports", "discovery", "bbc", False, "bbc-world-neutral",
+                host, '["world"]', "[]", "world",
+            )
+            evidence = claim_specific_evidence_row(row, "Story subject", **kwargs)
+            self.assertEqual(evidence["registry_matched"], expected, host)
+            self.assertEqual(
+                verify_evidence([evidence]),
+                VerificationState.VERIFIED if expected else VerificationState.UNVERIFIED,
+                host,
+            )
+
     def test_grounded_output_accepts_only_supplied_evidence(self):
         evidence = {"e1": "release v2.0 launched"}
         output = json.dumps({"decision": "verified", "confidence": 0.9, "summary": "release v2.0 launched", "evidence_ids": ["e1"], "facts": ["v2.0"]})

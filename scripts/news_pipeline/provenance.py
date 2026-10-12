@@ -48,6 +48,11 @@ def _strings(name: str, value: object) -> tuple[str, ...]:
     return result
 
 
+def publisher_host_matches(host: str, rule_host: str) -> bool:
+    """True when ``host`` is the rule host or a subdomain of it (dot boundary)."""
+    return bool(rule_host) and (host == rule_host or host.endswith(f".{rule_host}"))
+
+
 @dataclass(frozen=True, slots=True)
 class PublisherRule:
     rule_id: str
@@ -133,7 +138,7 @@ class PublisherRegistry:
 
     @staticmethod
     def _host_matches(host: str, rule_host: str) -> bool:
-        return host == rule_host or host.endswith(f".{rule_host}")
+        return publisher_host_matches(host, rule_host)
 
     def classify(
         self,
@@ -251,4 +256,5 @@ __all__ = [
     "PublisherRule",
     "load_provenance",
     "normalize_publisher_host",
+    "publisher_host_matches",
 ]
