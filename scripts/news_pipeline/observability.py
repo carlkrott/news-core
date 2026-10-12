@@ -8,6 +8,7 @@ cores keep their injected, deterministic clocks.
 from __future__ import annotations
 
 import dataclasses
+import enum
 import json
 import sqlite3
 from collections.abc import Iterable, Mapping
@@ -44,6 +45,23 @@ def scalars(value: Any) -> dict[str, Any]:
         for key, item in items
         if item is None or type(item) in (int, float, str, bool)
     }
+
+
+def plain(value: Any) -> Any:
+    """JSON-ready copy of a report: dataclasses become objects, tuples lists, enums values."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {field.name: plain(getattr(value, field.name)) for field in dataclasses.fields(value)}
+    if isinstance(value, Mapping):
+        return {str(key): plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [plain(item) for item in value]
+    if isinstance(value, enum.Enum):
+        return plain(value.value)
+    if isinstance(value, datetime):
+        return iso_ms(value)
+    if value is None or type(value) in (int, float, str, bool):
+        return value
+    return str(value)
 
 
 def summary_json(payload: Mapping[str, Any]) -> str:
@@ -265,6 +283,7 @@ __all__ = [
     "category_funnel",
     "iso_ms",
     "model_call_counts",
+    "plain",
     "record_job_run",
     "record_model_calls",
     "scalars",

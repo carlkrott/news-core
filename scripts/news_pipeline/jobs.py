@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from .observability import category_funnel, iso_ms, record_job_run, scalars, utc_now
+from .observability import category_funnel, iso_ms, plain, record_job_run, scalars, utc_now
 
 
 _FACTORY_RE = re.compile(
@@ -135,6 +135,8 @@ def _json(value: dict[str, Any]) -> None:
             active = sys.exc_info()[1]
             if active is not None:
                 value.setdefault("error_class", _error_class(active))
+            if _OBSERVED.get("job"):
+                value = {"job": _OBSERVED["job"], "state": "failed", **value}
         value["started_at"] = iso_ms(started)
         value["finished_at"] = iso_ms(finished)
         value["duration_ms"] = max(0, round((finished - started).total_seconds() * 1000))
@@ -199,7 +201,7 @@ def _run_tick(args: argparse.Namespace) -> int:
         "job": "tick",
         "state": "completed",
         "network_used": True,
-        "report": report.__dict__ if hasattr(report, "__dict__") else str(report),
+        "report": plain(report),
         "counts": scalars(report),
         "investigations_enqueued": sum(
             1 for _task_id, created in investigations_enqueued if created
@@ -250,8 +252,8 @@ def _run_process(args: argparse.Namespace) -> int:
         "job": "process",
         "state": "completed",
         "network_used": False,
-        "report": report.__dict__ if hasattr(report, "__dict__") else str(report),
-        "event_report": event_report.__dict__ if hasattr(event_report, "__dict__") else str(event_report),
+        "report": plain(report),
+        "event_report": plain(event_report),
         "counts": scalars(report),
         "event_counts": scalars(event_report),
         "funnel_24h": funnel,
@@ -622,6 +624,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.job in _UNRECORDED_JOBS:
         return _dispatch(args)
     _OBSERVED["started"] = utc_now()
+    _OBSERVED["job"] = args.job
     try:
         exit_code = _dispatch(args)
     except BaseException as exc:

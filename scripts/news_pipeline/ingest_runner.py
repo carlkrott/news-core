@@ -466,6 +466,12 @@ def _sync_sources(
                        config_hash=excluded.config_hash""",
                 values,
             )
+        configured = [source.source_id for source in sources]
+        # A source removed from config is retired; re-adding it re-enables it via the upsert above.
+        connection.execute(
+            f"UPDATE source_registry SET enabled=0 WHERE enabled=1 AND source_id NOT IN ({','.join('?' * len(configured))})",
+            configured,
+        )
         connection.commit()
     except sqlite3.Error:
         connection.rollback()
