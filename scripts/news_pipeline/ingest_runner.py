@@ -121,6 +121,7 @@ class SourceResult:
     next_due_at: str | None
     error: str | None = None
     feed_lane_ids: tuple[str, ...] = field(default_factory=tuple)
+    queries_not_modified: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +138,9 @@ class IngestReport:
     total_retries: int
     query_results: tuple[QueryResult, ...] = field(default_factory=tuple)
     source_results: tuple[SourceResult, ...] = field(default_factory=tuple)
+    # HTTP 304 answers to conditional GETs: "unchanged since last fetch", not
+    # "fetched and empty". Reporting only; the stored query status is unchanged.
+    total_queries_not_modified: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,6 +311,7 @@ async def run_ingest(
             total_retries=sum(result.retries for result in query_results),
             query_results=tuple(query_results),
             source_results=tuple(source_results),
+            total_queries_not_modified=sum(result.http_status == 304 for result in query_results),
         )
     finally:
         connection.close()
@@ -1081,6 +1086,7 @@ def _finalize_sources(
                 next_due_at=effective_next_due,
                 error="; ".join(errors) if errors else ("source lease was replaced" if effective_next_due is None else None),
                 feed_lane_ids=tuple(sorted({result.feed_lane_id for result in selected if result.feed_lane_id})),
+                queries_not_modified=sum(result.http_status == 304 for result in selected),
             )
         )
     return results
