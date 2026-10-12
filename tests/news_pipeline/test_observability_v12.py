@@ -137,6 +137,8 @@ class JobRunRecordingTests(_V11Fixture):
         funnel = out["funnel_24h"]
         self.assertEqual(funnel["window_hours"], 24)
         self.assertEqual(funnel["categories"]["ai"]["items"], 2)
+        ai = funnel["categories"]["ai"]
+        self.assertEqual((ai["verified"], ai["event_versions"], ai["eligible"]), (2, 2, 2))
         summary = json.loads(self.con.execute("SELECT summary_json FROM job_runs").fetchone()[0])
         self.assertEqual(summary["funnel_24h"]["categories"]["ai"]["items"], 2)
 

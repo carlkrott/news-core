@@ -6,10 +6,6 @@ earlier validator still passes on a migrated database.
 * ``job_runs``: measured wall-clock start/end/duration per cron job run.
 * ``model_calls``: one row per subject-model HTTP call (model, endpoint host,
   sizes, timeout, latency, outcome class). No request content, path or key.
-* ``claim_expiry``: pending claims retired after a TTL (claims.status has a
-  CHECK constraint, so expiry is recorded beside the claim, kept for audit).
-* ``source_backoff``: consecutive-failure state behind the source backoff.
-* ``source_retirements``: sources removed from config or renamed.
 """
 from __future__ import annotations
 
@@ -22,9 +18,6 @@ SCHEMA_VERSION = 12
 V12_TABLES = (
     "job_runs",
     "model_calls",
-    "claim_expiry",
-    "source_backoff",
-    "source_retirements",
 )
 V12_COLUMNS = {
     "job_runs": (
@@ -52,24 +45,10 @@ V12_COLUMNS = {
         "outcome",
         "http_status",
     ),
-    "claim_expiry": ("claim_id", "pending_since", "expired_at", "ttl_days"),
-    "source_backoff": (
-        "source_id",
-        "consecutive_failures",
-        "backoff_minutes",
-        "first_failure_at",
-        "last_failure_at",
-        "flagged_at",
-        "updated_at",
-    ),
-    "source_retirements": ("source_id", "retired_at", "reason", "replaced_by"),
 }
 V12_FOREIGN_KEYS = {
     "job_runs": frozenset(),
     "model_calls": frozenset(),
-    "claim_expiry": frozenset({("claims", "claim_id", "claim_id")}),
-    "source_backoff": frozenset({("source_registry", "source_id", "source_id")}),
-    "source_retirements": frozenset({("source_registry", "source_id", "source_id")}),
 }
 JOB_RUN_STATES = ("completed", "disabled", "failed")
 MODEL_CALL_OUTCOMES = (
@@ -80,7 +59,6 @@ MODEL_CALL_OUTCOMES = (
     "invalid_response",
     "oversize",
 )
-RETIREMENT_REASONS = ("removed_from_config", "renamed")
 
 _TABLE_SQL = (
     """
@@ -110,33 +88,6 @@ CREATE TABLE model_calls(
     latency_ms INTEGER NOT NULL CHECK(latency_ms >= 0),
     outcome TEXT NOT NULL CHECK(outcome IN ('ok','timeout','http_error','connection','invalid_response','oversize')),
     http_status INTEGER CHECK(http_status IS NULL OR http_status BETWEEN 100 AND 599)
-)
-""",
-    """
-CREATE TABLE claim_expiry(
-    claim_id TEXT PRIMARY KEY REFERENCES claims(claim_id),
-    pending_since TEXT NOT NULL,
-    expired_at TEXT NOT NULL,
-    ttl_days INTEGER NOT NULL CHECK(ttl_days > 0)
-)
-""",
-    """
-CREATE TABLE source_backoff(
-    source_id TEXT PRIMARY KEY REFERENCES source_registry(source_id),
-    consecutive_failures INTEGER NOT NULL CHECK(consecutive_failures >= 0),
-    backoff_minutes INTEGER NOT NULL CHECK(backoff_minutes >= 0),
-    first_failure_at TEXT,
-    last_failure_at TEXT,
-    flagged_at TEXT,
-    updated_at TEXT NOT NULL
-)
-""",
-    """
-CREATE TABLE source_retirements(
-    source_id TEXT PRIMARY KEY REFERENCES source_registry(source_id),
-    retired_at TEXT NOT NULL,
-    reason TEXT NOT NULL CHECK(reason IN ('removed_from_config','renamed')),
-    replaced_by TEXT CHECK(replaced_by IS NULL OR length(trim(replaced_by)) > 0)
 )
 """,
 )
@@ -273,7 +224,6 @@ def migrate_v12(connection: sqlite3.Connection, applied_at: str) -> bool:
 __all__ = [
     "JOB_RUN_STATES",
     "MODEL_CALL_OUTCOMES",
-    "RETIREMENT_REASONS",
     "SCHEMA_VERSION",
     "V12_COLUMNS",
     "V12_TABLES",

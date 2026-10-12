@@ -187,8 +187,10 @@ def category_funnel(db_path: str | Path, as_of: str, *, hours: int = 24) -> dict
     """Per-category counts for the ``hours`` before ``as_of`` (read-only).
 
     items: source items retrieved; claims: claims extracted from those items,
-    split by status; event_versions: event versions that became valid; plus
-    stories per subject from the latest subject report in the window.
+    split by status; event_versions: event versions that became valid;
+    eligible: latest versions that pass the report's own selection
+    (``report_builder._latest_events``); plus stories per subject from the
+    latest subject report in the window.
     """
     if not as_of.endswith("Z"):
         raise ValueError("as_of must be a UTC Z timestamp")
@@ -202,7 +204,15 @@ def category_funnel(db_path: str | Path, as_of: str, *, hours: int = 24) -> dict
         def bucket(category: str) -> dict[str, int]:
             return categories.setdefault(
                 category,
-                {"items": 0, "claims": 0, "verified": 0, "pending": 0, "rejected": 0, "event_versions": 0},
+                {
+                    "items": 0,
+                    "claims": 0,
+                    "verified": 0,
+                    "pending": 0,
+                    "rejected": 0,
+                    "event_versions": 0,
+                    "eligible": 0,
+                },
             )
 
         for category, count in connection.execute(
@@ -226,6 +236,10 @@ def category_funnel(db_path: str | Path, as_of: str, *, hours: int = 24) -> dict
             (lower, upper),
         ):
             bucket(category)["event_versions"] = count
+        from .report_builder import _latest_events
+
+        for row in _latest_events(connection, lower, upper):
+            bucket(str(row[3]))["eligible"] += 1
         stories: dict[str, int] = {}
         try:
             for subject_id, story_count in connection.execute(
