@@ -345,5 +345,66 @@ class IngestSchemaGateTests(_V11Fixture):
         self.assertIn(f"v4-v{newest} prefix", source, "a new schema module needs a matching ingest gate")
 
 
+class CronLineFormatTests(_V11Fixture):
+    """Batch 2: every cron line is one JSON object with real fields, failures included."""
+
+    def tick(self) -> tuple[int, dict]:
+        return self.run_job(
+            "tick", "--db", str(self.db_path), "--enable-network", "--sources", "s.toml",
+            "--topics", "t.toml", "--policy", "p.toml", "--run-started-at", V12_AT,
+        )
+
+    def test_plain_turns_slotted_reports_into_json_objects(self) -> None:
+        import dataclasses
+        import enum
+
+        class Kind(enum.Enum):
+            FEED = "feed"
+
+        @dataclasses.dataclass(frozen=True, slots=True)
+        class Lane:
+            kind: Kind
+            ids: tuple[str, ...]
+
+        @dataclasses.dataclass(frozen=True, slots=True)
+        class Report:
+            run_started_at: str
+            lanes: tuple[Lane, ...]
+            by_source: dict[str, int]
+
+        report = Report(V12_AT, (Lane(Kind.FEED, ("a", "b")),), {"src": 3})
+        expected = {
+            "run_started_at": V12_AT,
+            "lanes": [{"kind": "feed", "ids": ["a", "b"]}],
+            "by_source": {"src": 3},
+        }
+        self.assertEqual(observability.plain(report), expected)
+        self.assertEqual(json.loads(json.dumps(observability.plain(report))), expected)
+
+    def test_tick_report_is_a_json_object_not_a_repr(self) -> None:
+        import dataclasses
+
+        @dataclasses.dataclass(frozen=True, slots=True)
+        class Report:
+            run_started_at: str
+            queries_attempted: int
+            failures: tuple[str, ...]
+
+        with patch("news_pipeline.ingest_runner.run_ingest_sync", return_value=Report(V12_AT, 4, ("x",))):
+            code, out = self.tick()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["report"], {"run_started_at": V12_AT, "queries_attempted": 4, "failures": ["x"]})
+        self.assertEqual(out["counts"]["queries_attempted"], 4)
+
+    def test_failed_lines_name_their_job_and_state(self) -> None:
+        with patch("news_pipeline.ingest_runner.run_ingest_sync", side_effect=ValueError("bad schema")):
+            code, out = self.tick()
+        self.assertEqual(code, 1)
+        self.assertEqual((out["job"], out["state"], out["error_class"]), ("tick", "failed", "ValueError"))
+        self.assertEqual(out["error"]["message"], "bad schema")
+        code, out = self.run_job("tick", "--db", str(self.db_path), "--enable-network")
+        self.assertEqual((code, out["job"], out["state"]), (2, "tick", "failed"))
+
+
 if __name__ == "__main__":
     unittest.main()

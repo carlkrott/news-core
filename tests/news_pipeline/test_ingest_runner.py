@@ -329,6 +329,25 @@ class SchemaAndLeaseTests(RunnerCase):
         finally:
             connection.close()
 
+    async def test_config_sync_retires_removed_sources_and_reenables_readded_ones(self) -> None:
+        both = load_registry(
+            write_sources(self.root / "both.toml", [source(), source("src2", host="other.example.test")]),
+            TOPICS,
+            POLICY,
+        )
+        only_first = load_registry(self.sources, TOPICS, POLICY)
+        connection = _open_writer(self.db)
+        try:
+            enabled = lambda: dict(connection.execute("SELECT source_id,enabled FROM source_registry WHERE source_id LIKE 'src%'"))
+            _sync_sources(connection, both.sources, RUN_AT)
+            self.assertEqual(enabled(), {"src1": 1, "src2": 1})
+            _sync_sources(connection, only_first.sources, "2026-01-01T00:01:00Z")
+            self.assertEqual(enabled(), {"src1": 1, "src2": 0})
+            _sync_sources(connection, both.sources, "2026-01-01T00:02:00Z")
+            self.assertEqual(enabled(), {"src1": 1, "src2": 1})
+        finally:
+            connection.close()
+
     async def test_claim_is_atomic_and_reclaimable_at_lease_expiry(self) -> None:
         config = load_registry(self.sources, TOPICS, POLICY)
         connection = _open_writer(self.db)
