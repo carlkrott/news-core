@@ -411,7 +411,10 @@ class PersistenceTests(RunnerCase):
         await self.run_with(first)
         self.make_due("src1")
         second = ScriptedFactory({"src1": [response(status=304, body=b"", content_type="text/plain")]})
-        await self.run_with(second, run_at="2026-01-01T01:00:00Z")
+        report = await self.run_with(second, run_at="2026-01-01T01:00:00Z")
+        self.assertEqual(report.total_queries_not_modified, 1)
+        self.assertEqual(report.source_results[0].queries_not_modified, 1)
+        self.assertEqual(report.total_items_returned, 0)
         state = self.rows(
             "SELECT etag,last_modified,last_http_status FROM fetch_state WHERE source_id='src1'"
         )[0]

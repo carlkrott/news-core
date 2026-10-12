@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from .observability import category_funnel, iso_ms, record_job_run, scalars, utc_now
+
 
 _FACTORY_RE = re.compile(
     r"news_private(?:\.[A-Za-z_][A-Za-z0-9_]*)+:[A-Za-z_][A-Za-z0-9_]*\Z"
@@ -85,6 +87,9 @@ def _parser() -> argparse.ArgumentParser:
     migrate_v11 = sub.add_parser("migrate-v11")
     _add_common_db(migrate_v11)
     migrate_v11.add_argument("--applied-at", required=True)
+    migrate_v12 = sub.add_parser("migrate-v12")
+    _add_common_db(migrate_v12)
+    migrate_v12.add_argument("--applied-at", required=True)
     return parser
 
 
@@ -104,7 +109,37 @@ def _parse_utc(value: str, *, name: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+# Wall-clock observation of the current job (measured here only; pipeline cores
+# keep their injected clocks). Set by main(); read by _json() and the job_runs row.
+_OBSERVED: dict[str, Any] = {}
+_UNRECORDED_JOBS = frozenset({"health"})
+
+
+def _error_class(exc: BaseException) -> str:
+    outer = type(exc).__name__
+    root = exc
+    seen: set[int] = set()
+    while root.__cause__ is not None and id(root) not in seen:
+        seen.add(id(root))
+        root = root.__cause__
+    inner = type(root).__name__
+    return outer if root is exc or inner == outer else f"{outer}:{inner}"
+
+
 def _json(value: dict[str, Any]) -> None:
+    started = _OBSERVED.get("started")
+    if started is not None and isinstance(value, dict):
+        finished = utc_now()
+        value = dict(value)
+        if "error" in value:
+            active = sys.exc_info()[1]
+            if active is not None:
+                value.setdefault("error_class", _error_class(active))
+        value["started_at"] = iso_ms(started)
+        value["finished_at"] = iso_ms(finished)
+        value["duration_ms"] = max(0, round((finished - started).total_seconds() * 1000))
+        _OBSERVED["payload"] = value
+        _OBSERVED["finished"] = finished
     print(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
 
 
@@ -165,6 +200,7 @@ def _run_tick(args: argparse.Namespace) -> int:
         "state": "completed",
         "network_used": True,
         "report": report.__dict__ if hasattr(report, "__dict__") else str(report),
+        "counts": scalars(report),
         "investigations_enqueued": sum(
             1 for _task_id, created in investigations_enqueued if created
         ),
@@ -206,12 +242,19 @@ def _run_process(args: argparse.Namespace) -> int:
     except Exception as exc:
         _json({"error": {"type": "runtime", "message": str(exc)}})
         return 1
+    try:
+        funnel: dict[str, Any] = category_funnel(args.db, args.evaluated_at)
+    except Exception as exc:
+        funnel = {"error_class": _error_class(exc)}
     _json({
         "job": "process",
         "state": "completed",
         "network_used": False,
         "report": report.__dict__ if hasattr(report, "__dict__") else str(report),
         "event_report": event_report.__dict__ if hasattr(event_report, "__dict__") else str(event_report),
+        "counts": scalars(report),
+        "event_counts": scalars(event_report),
+        "funnel_24h": funnel,
     })
     return 0
 
@@ -385,6 +428,8 @@ def _run_daily_report(args: argparse.Namespace) -> int:
         _validate_daily_report_schema(args.db)
         prior = _resolve_report_prior(args.db, as_of, prior)
         from .report_builder import run_report
+        from .observability import model_call_counts, record_model_calls
+        from .subject_model_transport import recording_calls
         summarizer = _load_subject_summarizer()
         model_calls_before = (
             summarizer.model_call_count if summarizer is not None else 0
@@ -392,10 +437,14 @@ def _run_daily_report(args: argparse.Namespace) -> int:
         kwargs: dict[str, Any] = {"last_completed_upper_utc": prior}
         if summarizer is not None:
             kwargs["summarizer"] = summarizer
-        result = run_report(
-            Path(args.db), Path(args.artifact_root), as_of, **kwargs
-        )
-        network_used = bool(
+        with recording_calls() as model_calls:
+            try:
+                result = run_report(
+                    Path(args.db), Path(args.artifact_root), as_of, **kwargs
+                )
+            finally:
+                record_model_calls(args.db, job=args.job, records=model_calls)
+        network_used = bool(model_calls) or bool(
             summarizer is not None
             and summarizer.model_call_count > model_calls_before
         )
@@ -412,6 +461,7 @@ def _run_daily_report(args: argparse.Namespace) -> int:
         "network_used": network_used,
         "replayed": False,
         "message_count": 0,
+        "model_calls": model_call_counts(model_calls),
     })
     return 0
 
@@ -506,8 +556,82 @@ def _run_migrate_v11(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_migrate_v12(args: argparse.Namespace) -> int:
+    connection: sqlite3.Connection | None = None
+    try:
+        if not Path(args.db).is_file():
+            raise ValueError("--db must be a file")
+        applied_at = _parse_utc(args.applied_at, name="--applied-at")
+        from .schema_v12 import migrate_v12
+
+        connection = sqlite3.connect(args.db, isolation_level=None, timeout=5.0)
+        applied = migrate_v12(
+            connection,
+            applied_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        )
+    except Exception as exc:
+        _json({"error": {"type": "runtime", "message": str(exc)}})
+        return 1
+    finally:
+        if connection is not None:
+            connection.close()
+    _json({
+        "job": "migrate-v12",
+        "state": "completed",
+        "schema_version": 12,
+        "applied": applied,
+        "network_used": False,
+    })
+    return 0
+
+
+def _slot(args: argparse.Namespace) -> str | None:
+    for name in ("run_started_at", "evaluated_at", "as_of_utc"):
+        value = getattr(args, name, None)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _record_run(args: argparse.Namespace, exit_code: int, error_class: str | None) -> None:
+    started = _OBSERVED.get("started")
+    db = getattr(args, "db", None)
+    if started is None or not db:
+        return
+    payload = _OBSERVED.get("payload") or {}
+    finished = _OBSERVED.get("finished") or utc_now()
+    state = payload.get("state")
+    if exit_code != 0 or "error" in payload or state not in ("completed", "disabled"):
+        state = "failed"
+    record_job_run(
+        db,
+        job=args.job,
+        slot_utc=_slot(args),
+        started_at=started,
+        finished_at=finished,
+        exit_code=exit_code,
+        state=state,
+        error_class=error_class or payload.get("error_class"),
+        payload=payload,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    _OBSERVED.clear()
+    if args.job in _UNRECORDED_JOBS:
+        return _dispatch(args)
+    _OBSERVED["started"] = utc_now()
+    try:
+        exit_code = _dispatch(args)
+    except BaseException as exc:
+        _record_run(args, 1, _error_class(exc))
+        raise
+    _record_run(args, exit_code, None)
+    return exit_code
+
+
+def _dispatch(args: argparse.Namespace) -> int:
     if args.job == "tick":
         return _run_tick(args)
     if args.job == "process":
@@ -522,6 +646,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_migrate_v10(args)
     if args.job == "migrate-v11":
         return _run_migrate_v11(args)
+    if args.job == "migrate-v12":
+        return _run_migrate_v12(args)
     if args.job == "health":
         from .news_health import health_snapshot
         _json(health_snapshot(args.db))

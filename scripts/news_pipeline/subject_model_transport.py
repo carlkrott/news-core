@@ -5,10 +5,14 @@ import http.client
 import json
 import math
 import os
+import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 from .briefing_summarizer import MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, SummarizerTransportError
@@ -64,6 +68,41 @@ def request_timeout(request_bytes: int) -> float:
     )
 
 
+# Per-call observability. While a ``recording_calls()`` block is active every
+# HTTP call made by a configured transport appends one record: model, endpoint
+# host (no path, query or credentials), sizes, timeout, latency and an outcome
+# class. Request/response content is never recorded.
+_CALL_SINK: list[dict[str, Any]] | None = None
+
+
+@contextmanager
+def recording_calls() -> Iterator[list[dict[str, Any]]]:
+    """Collect one record per subject-model HTTP call made inside the block."""
+    global _CALL_SINK
+    previous = _CALL_SINK
+    sink: list[dict[str, Any]] = []
+    _CALL_SINK = sink
+    try:
+        yield sink
+    finally:
+        _CALL_SINK = previous
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return True
+    reason = getattr(exc, "reason", None)
+    return isinstance(reason, (TimeoutError, socket.timeout))
+
+
+def _outcome_for(exc: BaseException) -> tuple[str, int | None]:
+    if isinstance(exc, urllib.error.HTTPError):
+        return "http_error", exc.code if 100 <= exc.code <= 599 else None
+    if _is_timeout(exc):
+        return "timeout", None
+    return "connection", None
+
+
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Keep an approved route from redirecting private inputs elsewhere."""
 
@@ -98,6 +137,7 @@ def configured_transport(
     ):
         raise ValueError("subject model endpoint configuration is invalid")
     endpoint = base_url.rstrip("/") + "/chat/completions"
+    endpoint_host = parsed.hostname if parsed.port is None else f"{parsed.hostname}:{parsed.port}"
     api_key = env.get(_API_KEY_ENV, "")
     if opener is None:
         opener = urllib.request.build_opener(_NoRedirectHandler()).open
@@ -145,33 +185,59 @@ def configured_transport(
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
+        timeout = request_timeout(len(body))
+        record: dict[str, Any] = {
+            "started_at": datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "model": model,
+            "endpoint_host": endpoint_host,
+            "request_bytes": len(body),
+            "response_bytes": None,
+            "timeout_s": timeout,
+            "outcome": "connection",
+            "http_status": None,
+        }
+        started = time.monotonic()
         try:
-            response = opener(request, timeout=request_timeout(len(body)))
             try:
-                response_bytes = response.read(MAX_RESPONSE_BYTES + 1)
-            finally:
-                close = getattr(response, "close", None)
-                if callable(close):
-                    close()
-        except (
-            urllib.error.URLError,
-            http.client.HTTPException,
-            TimeoutError,
-            OSError,
-        ) as exc:
-            raise SummarizerTransportError("subject model transport failed") from exc
-        if len(response_bytes) > MAX_RESPONSE_BYTES:
-            raise SummarizerTransportError("subject model response exceeds configured bounds")
-        try:
-            decoded = json.loads(response_bytes)
-            content = decoded["choices"][0]["message"]["content"]
-        except (UnicodeDecodeError, json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
-            raise SummarizerTransportError("subject model response is invalid") from exc
-        if not isinstance(content, str):
-            raise SummarizerTransportError("subject model response is invalid")
-        result = content.encode("utf-8")
-        if len(result) > MAX_RESPONSE_BYTES:
-            raise SummarizerTransportError("subject model response exceeds configured bounds")
-        return result
+                response = opener(request, timeout=timeout)
+                status = getattr(response, "status", None)
+                record["http_status"] = status if type(status) is int and 100 <= status <= 599 else None
+                try:
+                    response_bytes = response.read(MAX_RESPONSE_BYTES + 1)
+                finally:
+                    close = getattr(response, "close", None)
+                    if callable(close):
+                        close()
+            except (
+                urllib.error.URLError,
+                http.client.HTTPException,
+                TimeoutError,
+                OSError,
+            ) as exc:
+                record["outcome"], record["http_status"] = _outcome_for(exc)
+                raise SummarizerTransportError("subject model transport failed") from exc
+            record["response_bytes"] = len(response_bytes)
+            if len(response_bytes) > MAX_RESPONSE_BYTES:
+                record["outcome"] = "oversize"
+                raise SummarizerTransportError("subject model response exceeds configured bounds")
+            record["outcome"] = "invalid_response"
+            try:
+                decoded = json.loads(response_bytes)
+                content = decoded["choices"][0]["message"]["content"]
+            except (UnicodeDecodeError, json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+                raise SummarizerTransportError("subject model response is invalid") from exc
+            if not isinstance(content, str):
+                raise SummarizerTransportError("subject model response is invalid")
+            result = content.encode("utf-8")
+            if len(result) > MAX_RESPONSE_BYTES:
+                record["outcome"] = "oversize"
+                raise SummarizerTransportError("subject model response exceeds configured bounds")
+            record["outcome"] = "ok"
+            return result
+        finally:
+            record["latency_ms"] = max(0, round((time.monotonic() - started) * 1000))
+            sink = _CALL_SINK
+            if sink is not None:
+                sink.append(record)
 
     return transport
