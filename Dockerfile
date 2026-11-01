@@ -21,7 +21,7 @@
 #     read_only, cap_drop ALL, no-new-privileges, tmpfs /tmp, and
 #     bounded pids/memory/cpu through compose.yaml.
 
-FROM python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534 AS runtime
+FROM python:3.15-slim@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955fae45fe7913 AS runtime
 
 # CI supplies the repository, commit, and release version.  The explicit
 # placeholders keep local builds truthful before the repository is published.
